@@ -6,6 +6,12 @@ layout(location = 0) out vec4 frag_color;
 layout(set = 0, binding = 0) uniform texture2D t_texture;
 layout(set = 0, binding = 1) uniform sampler s_sampler;
 
+layout(set = 0, binding = 2) uniform Uniforms {
+    float time;
+    float width;
+    float height;
+};
+
 // CRT effect parameters (tuned for 720p visibility)
 const float CURVATURE = 0.08;           // Screen curvature amount
 const float SCANLINE_INTENSITY = 0.35;  // Scanline darkness
@@ -13,6 +19,7 @@ const float SCANLINE_COUNT = 360.0;     // Number of scanlines (fewer = thicker 
 const float VIGNETTE_INTENSITY = 0.5;   // Edge darkening
 const float BRIGHTNESS = 1.25;          // Overall brightness boost
 const float CHROMATIC_ABERRATION = 0.004; // RGB separation amount
+const float SCANLINE_SPEED = 2.0;       // Speed of scanline movement
 
 // Apply barrel distortion for CRT curvature
 vec2 curve_coords(vec2 uv) {
@@ -30,7 +37,8 @@ float inside_screen(vec2 uv) {
 
 // Generate scanline effect
 float scanline(vec2 uv) {
-    float line = sin(uv.y * SCANLINE_COUNT * 3.14159265);
+    // Add time-based movement to scanlines
+    float line = sin((uv.y + time * SCANLINE_SPEED * 0.01) * SCANLINE_COUNT * 3.14159265);
     return 1.0 - SCANLINE_INTENSITY * (0.5 - 0.5 * line);
 }
 

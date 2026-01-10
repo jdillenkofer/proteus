@@ -10,7 +10,8 @@ use anyhow::Result;
 /// Trait for shader processing pipelines.
 pub trait ShaderPipeline {
     /// Process a video frame through the shader.
-    fn process_frame(&mut self, input: &VideoFrame) -> Result<VideoFrame>;
+    /// `time` is the elapsed time in seconds since the application started.
+    fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame>;
 }
 
 /// Shader source with language specification.

@@ -73,6 +73,7 @@ struct ProteusApp {
     pipeline: Option<WgpuPipeline>,
     last_frame_time: Instant,
     frame_duration: Duration,
+    start_time: Instant,
 }
 
 impl ProteusApp {
@@ -86,6 +87,7 @@ impl ProteusApp {
             pipeline: None,
             last_frame_time: Instant::now(),
             frame_duration,
+            start_time: Instant::now(),
         }
     }
 
@@ -134,7 +136,8 @@ impl ProteusApp {
         match capture.capture_frame() {
             Ok(frame) => {
                 // Process through shader
-                match pipeline.process_frame(&frame) {
+                let time = self.start_time.elapsed().as_secs_f32();
+                match pipeline.process_frame(&frame, time) {
                     Ok(processed) => {
                         // Display in window
                         renderer.set_frame(processed);
@@ -329,6 +332,7 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
     info!("Virtual camera output initialized");
 
     let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
+    let start_time = Instant::now();
     info!("Starting virtual camera stream at {} fps", args.fps);
 
     // Main loop
@@ -339,11 +343,12 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
         match capture.capture_frame() {
             Ok(frame) => {
                 // Process through shader
-                match pipeline.process_frame(&frame) {
+                let time = start_time.elapsed().as_secs_f32();
+                match pipeline.process_frame(&frame, time) {
                     Ok(processed) => {
-                        // Send to virtual camera
+                        // Write to virtual camera
                         if let Err(e) = output.write_frame(&processed) {
-                            error!("Virtual camera output error: {}", e);
+                            error!("Output error: {}", e);
                         }
                     }
                     Err(e) => {

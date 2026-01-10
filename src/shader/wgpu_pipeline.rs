@@ -41,6 +41,17 @@ fn fs_main(@location(0) tex_coords: vec2<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Uniforms passed to the shader.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Uniforms {
+    pub time: f32,
+    pub width: f32,
+    pub height: f32,
+    pub _padding: u32, // Padding for 16-byte alignment
+}
+
+
 /// GPU shader pipeline using wgpu.
 pub struct WgpuPipeline {
     device: wgpu::Device,
@@ -49,6 +60,7 @@ pub struct WgpuPipeline {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     output_width: u32,
     output_height: u32,
@@ -117,6 +129,16 @@ impl WgpuPipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -182,6 +204,20 @@ impl WgpuPipeline {
             ..Default::default()
         });
 
+        // Create uniform buffer
+        let uniforms = Uniforms {
+            time: 0.0,
+            width: width as f32,
+            height: height as f32,
+            _padding: 0,
+        };
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         Ok(Self {
             device,
             queue,
@@ -189,11 +225,13 @@ impl WgpuPipeline {
             vertex_buffer,
             index_buffer,
             bind_group_layout,
+            uniform_buffer,
             sampler,
             output_width: width,
             output_height: height,
         })
     }
+
 
     /// Converts GLSL fragment shader to WGSL.
     fn glsl_to_wgsl(glsl: &str) -> Result<String> {
@@ -242,7 +280,16 @@ impl WgpuPipeline {
 }
 
 impl ShaderPipeline for WgpuPipeline {
-    fn process_frame(&mut self, input: &VideoFrame) -> Result<VideoFrame> {
+    fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
+        // Update uniform buffer
+        let uniforms = Uniforms {
+            time,
+            width: self.output_width as f32,
+            height: self.output_height as f32,
+            _padding: 0,
+        };
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
         // Convert to RGBA if needed
         let rgba_input = input.to_rgba();
 
@@ -312,6 +359,10 @@ impl ShaderPipeline for WgpuPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.uniform_buffer.as_entire_binding(),
                 },
             ],
         });
