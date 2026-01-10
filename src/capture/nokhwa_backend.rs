@@ -4,7 +4,7 @@ use super::{CameraInfo, CaptureBackend, CaptureConfig};
 use crate::frame::{PixelFormat, VideoFrame};
 use anyhow::Result;
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::Camera;
 
 /// Webcam capture using the nokhwa library.
@@ -26,15 +26,116 @@ impl CaptureBackend for NokhwaCapture {
             .collect())
     }
 
-    fn open(config: CaptureConfig) -> Result<Self> {
-        let index = CameraIndex::Index(config.device_index);
-        // Use highest resolution available, then we'll get actual resolution after opening
-        let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
+    fn open(config: CaptureConfig) -> Result<Self> {      
+        // 1. Initialize logic: Try multiple "seed" formats to establish connection
+        // Some cameras are very picky and will reject "Closest" if the hint doesn't match roughly what they support.
+        // Prioritize high quality (1080p) and failover to lower resolutions/framerates.
+        // MJPEG is preferred for high resolutions due to USB bandwidth limits.
+        let seed_formats = vec![
+            // Full HD MJPEG 30fps
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 30),
+            // Full HD 25fps (PAL)
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 25),
+            // Full HD 15fps
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 15),
+            
+            // HD MJPEG 30fps
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30),
+            // HD 25fps
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 25),
+            // HD 15fps
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 15),
+            
+            // VGA MJPEG 30fps
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30),
+            // VGA 25fps
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 25),
+            // VGA 15fps
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 15),
 
-        let mut camera = Camera::new(index, requested)?;
-        camera.open_stream()?;
+            // YUYV Fallbacks (Uncompressed, usually reliable at low res)
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 25),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 30), // Often fails on USB 2.0 but worth a shot as last resort
+        ];
+
+        let mut camera = None;
+        let mut active_format = None;
+        
+        // Try to brute-force open the camera with known standard formats
+        for seed in seed_formats {
+            let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(seed));
+            let idx = CameraIndex::Index(config.device_index);
+            
+            // Try to create the camera instance
+            if let Ok(mut cam) = Camera::new(idx, requested) {
+                // CRITICAL: Verify if it actually opens the stream!
+                // Just creating the object isn't enough for some drivers.
+                if cam.open_stream().is_ok() {
+                    tracing::info!("Verified connection with seed format: {:?}", seed);
+                    active_format = Some(seed);
+                    camera = Some(cam);
+                    break;
+                }
+            }
+        }
+        
+        let mut camera = camera.ok_or_else(|| anyhow::anyhow!("Could not connect to and open stream on camera index {} with any standard format.", config.device_index))?;
+
+        // 2. Query supported formats to see if we can upgrade to the user's actual request
+        // Sometimes this returns empty, in which case we just stick with the working seed.
+        if let Ok(supported_formats) = camera.compatible_camera_formats() {
+            if !supported_formats.is_empty() {
+                // Find best match for USER CONFIG
+                let target_res = Resolution::new(config.width, config.height);
+                let mut best_format = None;
+                let mut best_score = -10000;
+
+                for fmt in &supported_formats {
+                    let mut score = 0;
+                    if fmt.resolution() == target_res { score += 1000; }
+                    else {
+                         let w_diff = (fmt.width() as i32 - config.width as i32).abs();
+                         let h_diff = (fmt.height() as i32 - config.height as i32).abs();
+                         score -= w_diff + h_diff;
+                    }
+                    if fmt.frame_rate() == config.fps { score += 500; }
+                    else if fmt.frame_rate() > config.fps { score += 100; }
+                    if fmt.format() == FrameFormat::MJPEG { score += 50; }
+
+                    if score > best_score {
+                        best_score = score;
+                        best_format = Some(*fmt);
+                    }
+                }
+
+                if let Some(better) = best_format {
+                    // Only switch if it's different/better than what we have active
+                    tracing::info!("Attempting to upgrade to better format: {:?}", better);
+                    
+                    let _ = camera.stop_stream(); 
+                    if let Ok(_) = camera.set_camera_requset(RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(better))) {
+                         if let Err(e) = camera.open_stream() {
+                             tracing::warn!("Failed to open stream with better format ({}), trying fallback...", e);
+                             // If upgrade failed, try to reopen with the original seed
+                             // This is a "best effort" recovery
+                             if let Some(seed) = active_format {
+                                 let _ = camera.set_camera_requset(RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(seed)));
+                                 let _ = camera.open_stream();
+                             }
+                         }
+                    } else {
+                         // Failed to set request, try to re-open existing
+                         let _ = camera.open_stream(); 
+                    }
+                }
+            } else {
+                tracing::warn!("Device reported empty supported formats list. Using fallback format.");
+            }
+        }
 
         let resolution = camera.resolution();
+        tracing::info!("Camera opened with resolution: {}", resolution);
 
         Ok(Self {
             camera,
