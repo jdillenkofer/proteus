@@ -2,7 +2,13 @@
 
 pub mod window_output;
 
+#[cfg(target_os = "windows")]
+pub mod virtual_camera;
+
 pub use window_output::WindowOutput;
+
+#[cfg(target_os = "windows")]
+pub use virtual_camera::{VirtualCameraConfig, VirtualCameraOutput};
 
 use crate::frame::VideoFrame;
 use anyhow::Result;

@@ -1,9 +1,11 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use proteus::capture::{CaptureBackend, CaptureConfig, NokhwaCapture};
 use proteus::output::window_output::WindowRenderer;
+#[cfg(target_os = "windows")]
+use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
 use proteus::shader::{ShaderPipeline, ShaderSource, WgpuPipeline};
 use std::fs;
 use std::path::PathBuf;
@@ -15,6 +17,16 @@ use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
+
+/// Output mode for processed video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputMode {
+    /// Display in a window (default)
+    Window,
+    /// Output to virtual camera (Windows only, requires OBS Virtual Camera)
+    #[cfg(target_os = "windows")]
+    VirtualCamera,
+}
 
 /// Cross-platform shader webcam transformer.
 #[derive(Parser, Debug)]
@@ -44,6 +56,10 @@ struct Args {
     /// List available cameras and exit
     #[arg(long)]
     list_devices: bool,
+
+    /// Output mode: window or virtual-camera
+    #[arg(long, value_enum, default_value = "window")]
+    output: OutputMode,
 }
 
 /// Application state for the event loop.
@@ -240,12 +256,111 @@ fn main() -> Result<()> {
 
     info!("Starting Proteus...");
 
-    // Create event loop and run
+    // Dispatch based on output mode
+    match args.output {
+        OutputMode::Window => run_window_mode(args)?,
+        #[cfg(target_os = "windows")]
+        OutputMode::VirtualCamera => run_virtual_camera_mode(args)?,
+    }
+
+    Ok(())
+}
+
+/// Run in window output mode (default).
+fn run_window_mode(args: Args) -> Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = ProteusApp::new(args);
     event_loop.run_app(&mut app)?;
 
+    Ok(())
+}
+
+/// Run in virtual camera output mode (Windows only).
+#[cfg(target_os = "windows")]
+fn run_virtual_camera_mode(args: Args) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    // Set up signal handler for graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        info!("Received interrupt signal, shutting down...");
+        r.store(false, Ordering::SeqCst);
+    })?;
+
+    // Initialize camera capture
+    let config = CaptureConfig {
+        device_index: args.input,
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+    };
+
+    info!("Opening camera device {}...", args.input);
+    let mut capture = NokhwaCapture::open(config)?;
+    info!("Camera opened successfully");
+
+    // Load shader if provided
+    let shader = if let Some(path) = &args.shader {
+        info!("Loading shader from {:?}", path);
+        let source = fs::read_to_string(path)?;
+        Some(ShaderSource::Glsl(source))
+    } else {
+        info!("Using passthrough shader");
+        None
+    };
+
+    // Initialize shader pipeline
+    let mut pipeline = WgpuPipeline::new(args.width, args.height, shader)?;
+    info!("Shader pipeline initialized");
+
+    // Initialize virtual camera output
+    let vc_config = VirtualCameraConfig {
+        width: args.width,
+        height: args.height,
+        fps: args.fps,
+    };
+    let mut output = VirtualCameraOutput::new(vc_config)?;
+    info!("Virtual camera output initialized");
+
+    let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
+    info!("Starting virtual camera stream at {} fps", args.fps);
+
+    // Main loop
+    while running.load(Ordering::SeqCst) {
+        let frame_start = Instant::now();
+
+        // Capture frame
+        match capture.capture_frame() {
+            Ok(frame) => {
+                // Process through shader
+                match pipeline.process_frame(&frame) {
+                    Ok(processed) => {
+                        // Send to virtual camera
+                        if let Err(e) = output.write_frame(&processed) {
+                            error!("Virtual camera output error: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Shader processing error: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Capture error: {}", e);
+            }
+        }
+
+        // Frame rate limiting
+        let elapsed = frame_start.elapsed();
+        if elapsed < frame_duration {
+            thread::sleep(frame_duration - elapsed);
+        }
+    }
+
+    info!("Virtual camera stream stopped");
     Ok(())
 }

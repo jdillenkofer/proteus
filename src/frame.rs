@@ -139,6 +139,73 @@ impl VideoFrame {
             data: rgba_data,
         }
     }
+
+    /// Converts this frame to NV12 format for virtual camera output.
+    /// NV12 is Y plane followed by interleaved UV plane (half resolution).
+    pub fn to_nv12(&self) -> VideoFrame {
+        let rgba = self.to_rgba();
+        let width = rgba.width as usize;
+        let height = rgba.height as usize;
+
+        // NV12 size: Y plane (width * height) + UV plane (width * height / 2)
+        let y_size = width * height;
+        let uv_size = y_size / 2;
+        let mut nv12_data = vec![0u8; y_size + uv_size];
+
+        // Convert to Y plane
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) * 4;
+                let r = rgba.data[idx] as f32;
+                let g = rgba.data[idx + 1] as f32;
+                let b = rgba.data[idx + 2] as f32;
+
+                // BT.601 Y conversion
+                let y_val = (0.299 * r + 0.587 * g + 0.114 * b).clamp(0.0, 255.0) as u8;
+                nv12_data[y * width + x] = y_val;
+            }
+        }
+
+        // Convert to UV plane (half resolution, interleaved)
+        let uv_offset = y_size;
+        for y in (0..height).step_by(2) {
+            for x in (0..width).step_by(2) {
+                // Average 2x2 block for UV
+                let mut r_sum = 0f32;
+                let mut g_sum = 0f32;
+                let mut b_sum = 0f32;
+
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let idx = ((y + dy) * width + (x + dx)) * 4;
+                        r_sum += rgba.data[idx] as f32;
+                        g_sum += rgba.data[idx + 1] as f32;
+                        b_sum += rgba.data[idx + 2] as f32;
+                    }
+                }
+
+                let r = r_sum / 4.0;
+                let g = g_sum / 4.0;
+                let b = b_sum / 4.0;
+
+                // BT.601 UV conversion
+                let u = (-0.169 * r - 0.331 * g + 0.500 * b + 128.0).clamp(0.0, 255.0) as u8;
+                let v = (0.500 * r - 0.419 * g - 0.081 * b + 128.0).clamp(0.0, 255.0) as u8;
+
+                let uv_idx = uv_offset + (y / 2) * width + x;
+                nv12_data[uv_idx] = u;
+                nv12_data[uv_idx + 1] = v;
+            }
+        }
+
+        VideoFrame {
+            width: self.width,
+            height: self.height,
+            format: PixelFormat::Nv12,
+            timestamp_us: self.timestamp_us,
+            data: nv12_data,
+        }
+    }
 }
 
 /// Vertex for rendering a full-screen quad.
