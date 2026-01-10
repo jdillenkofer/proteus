@@ -39,9 +39,9 @@ struct Args {
     #[arg(short, long, default_value = "0")]
     input: u32,
 
-    /// Path to GLSL fragment shader file
-    #[arg(short, long)]
-    shader: Option<PathBuf>,
+    /// Path to GLSL fragment shader file(s)
+    #[arg(short, long, num_args = 1..)]
+    shader: Vec<PathBuf>,
 
     /// Frame width
     #[arg(long, default_value = "1280")]
@@ -104,18 +104,21 @@ impl ProteusApp {
         self.capture = Some(NokhwaCapture::open(config)?);
         info!("Camera opened successfully");
 
-        // Load shader if provided
-        let shader = if let Some(path) = &self.args.shader {
-            info!("Loading shader from {:?}", path);
-            let source = fs::read_to_string(path)?;
-            Some(ShaderSource::Glsl(source))
-        } else {
+        // Load shaders if provided
+        let mut shaders = Vec::new();
+        if self.args.shader.is_empty() {
             info!("Using passthrough shader");
-            None
-        };
+            // Empty list implies default behavior in pipeline or we can pass None equivalent
+        } else {
+            for path in &self.args.shader {
+                info!("Loading shader from {:?}", path);
+                let source = fs::read_to_string(path)?;
+                shaders.push(ShaderSource::Glsl(source));
+            }
+        }
 
         // Initialize shader pipeline
-        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shader)?);
+        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders)?);
         info!("Shader pipeline initialized");
 
         Ok(())
@@ -308,18 +311,20 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
     let mut capture = NokhwaCapture::open(config)?;
     info!("Camera opened successfully");
 
-    // Load shader if provided
-    let shader = if let Some(path) = &args.shader {
-        info!("Loading shader from {:?}", path);
-        let source = fs::read_to_string(path)?;
-        Some(ShaderSource::Glsl(source))
-    } else {
+    // Load shaders if provided
+    let mut shaders = Vec::new();
+    if args.shader.is_empty() {
         info!("Using passthrough shader");
-        None
-    };
+    } else {
+        for path in &args.shader {
+            info!("Loading shader from {:?}", path);
+            let source = fs::read_to_string(path)?;
+            shaders.push(ShaderSource::Glsl(source));
+        }
+    }
 
     // Initialize shader pipeline
-    let mut pipeline = WgpuPipeline::new(args.width, args.height, shader)?;
+    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders)?;
     info!("Shader pipeline initialized");
 
     // Initialize virtual camera output

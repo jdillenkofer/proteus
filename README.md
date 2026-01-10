@@ -43,15 +43,22 @@ cargo run --release
 
 ### Applying Shaders
 
-Apply a custom GLSL fragment shader:
+You can apply a custom GLSL fragment shader using the `--shader` or `-s` flag.
 
 ```bash
 cargo run --release -- --shader shaders/crt.frag
 ```
 
-### Virtual Camera Output
+### Chaining Shaders
 
-#### Windows
+You can chain multiple shaders together by specifying the `-s` flag multiple times. The output of one shader becomes the input of the next.
+
+```bash
+# Apply Plasma effect, then Ripple distortion
+cargo run --release -- -s shaders/plasma.frag -s shaders/ripple.frag
+```
+
+### Virtual Camera (Linux/Windows)
 
 1. Ensure OBS Studio is installed.
 2. Run Proteus with the virtual camera output flag:
