@@ -101,7 +101,11 @@ impl CaptureBackend for NokhwaCapture {
                     }
                     if fmt.frame_rate() == config.fps { score += 500; }
                     else if fmt.frame_rate() > config.fps { score += 100; }
-                    if fmt.format() == FrameFormat::MJPEG { score += 50; }
+                    // Strongly prefer MJPEG - it has hardware decode and less USB bandwidth
+                    if fmt.format() == FrameFormat::MJPEG { score += 200; }
+                    // Avoid NV12/YUV on Windows - software conversion is slow
+                    if fmt.format() == FrameFormat::NV12 { score -= 100; }
+                    if fmt.format() == FrameFormat::YUYV { score -= 50; }
 
                     if score > best_score {
                         best_score = score;

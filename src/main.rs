@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use proteus::capture::{CaptureBackend, CaptureConfig, NokhwaCapture};
+use proteus::capture::{AsyncCapture, CaptureBackend, CaptureConfig, NokhwaCapture};
 use proteus::output::window_output::WindowRenderer;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
@@ -73,7 +73,7 @@ struct ProteusApp {
     args: Args,
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
-    capture: Option<NokhwaCapture>,
+    capture: Option<AsyncCapture>,
     pipeline: Option<WgpuPipeline>,
     last_frame_time: Instant,
     frame_duration: Duration,
@@ -109,9 +109,9 @@ impl ProteusApp {
         };
 
         info!("Opening camera device {}...", self.args.input);
-        let capture = NokhwaCapture::open(config)?;
+        let capture = AsyncCapture::new(config)?;
         let (cam_w, cam_h) = capture.frame_size();
-        info!("Camera opened successfully at {}x{}", cam_w, cam_h);
+        info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
         self.capture = Some(capture);
 
         // Load shaders if provided
@@ -154,26 +154,21 @@ impl ProteusApp {
             self.fps_last_time = Instant::now();
         }
 
-        // Capture frame
-        match capture.capture_frame() {
-            Ok(frame) => {
-                // Process through shader
-                let time = self.start_time.elapsed().as_secs_f32();
-                match pipeline.process_frame(&frame, time) {
-                    Ok(processed) => {
-                        // Display in window
-                        renderer.set_frame(processed);
-                        if let Err(e) = renderer.render() {
-                            error!("Render error: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Shader processing error: {}", e);
+        // Get latest frame (non-blocking)
+        if let Some(frame) = capture.get_latest_frame() {
+            // Process through shader
+            let time = self.start_time.elapsed().as_secs_f32();
+            match pipeline.process_frame(&frame, time) {
+                Ok(processed) => {
+                    // Display in window
+                    renderer.set_frame(processed);
+                    if let Err(e) = renderer.render() {
+                        error!("Render error: {}", e);
                     }
                 }
-            }
-            Err(e) => {
-                error!("Capture error: {}", e);
+                Err(e) => {
+                    error!("Shader processing error: {}", e);
+                }
             }
         }
     }
@@ -327,7 +322,7 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
         r.store(false, Ordering::SeqCst);
     })?;
 
-    // Initialize camera capture
+    // Initialize camera capture (async for better performance)
     let config = CaptureConfig {
         device_index: args.input,
         width: args.width,
@@ -336,8 +331,8 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
     };
 
     info!("Opening camera device {}...", args.input);
-    let mut capture = NokhwaCapture::open(config)?;
-    info!("Camera opened successfully");
+    let mut capture = AsyncCapture::new(config)?;
+    info!("Camera opened successfully (async capture)");
 
     // Load shaders if provided
     let mut shaders = Vec::new();
@@ -366,31 +361,38 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
 
     let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
     let start_time = Instant::now();
+    let mut frame_count = 0u32;
+    let mut fps_last_time = Instant::now();
     info!("Starting virtual camera stream at {} fps", args.fps);
 
     // Main loop
     while running.load(Ordering::SeqCst) {
         let frame_start = Instant::now();
 
-        // Capture frame
-        match capture.capture_frame() {
-            Ok(frame) => {
-                // Process through shader
-                let time = start_time.elapsed().as_secs_f32();
-                match pipeline.process_frame(&frame, time) {
-                    Ok(processed) => {
-                        // Write to virtual camera
-                        if let Err(e) = output.write_frame(&processed) {
-                            error!("Output error: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Shader processing error: {}", e);
+        // FPS counter
+        frame_count += 1;
+        let elapsed_fps = fps_last_time.elapsed();
+        if elapsed_fps >= Duration::from_secs(1) {
+            let fps = frame_count as f32 / elapsed_fps.as_secs_f32();
+            info!("Virtual camera: {:.2} FPS", fps);
+            frame_count = 0;
+            fps_last_time = Instant::now();
+        }
+
+        // Get latest frame (non-blocking)
+        if let Some(frame) = capture.get_latest_frame() {
+            // Process through shader
+            let time = start_time.elapsed().as_secs_f32();
+            match pipeline.process_frame(frame, time) {
+                Ok(processed) => {
+                    // Write to virtual camera
+                    if let Err(e) = output.write_frame(&processed) {
+                        error!("Output error: {}", e);
                     }
                 }
-            }
-            Err(e) => {
-                error!("Capture error: {}", e);
+                Err(e) => {
+                    error!("Shader processing error: {}", e);
+                }
             }
         }
 
