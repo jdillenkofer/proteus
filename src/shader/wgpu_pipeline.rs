@@ -48,7 +48,7 @@ pub struct Uniforms {
     pub time: f32,
     pub width: f32,
     pub height: f32,
-    pub _padding: u32, // Padding for 16-byte alignment
+    pub seed: f32,
 }
 
 
@@ -223,7 +223,7 @@ impl WgpuPipeline {
             time: 0.0,
             width: width as f32,
             height: height as f32,
-            _padding: 0,
+            seed: 0.0,
         };
 
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -300,7 +300,7 @@ impl ShaderPipeline for WgpuPipeline {
             time,
             width: self.output_width as f32,
             height: self.output_height as f32,
-            _padding: 0,
+            seed: rand::random::<f32>(),
         };
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 

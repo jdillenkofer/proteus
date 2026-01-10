@@ -10,6 +10,7 @@ layout(set = 0, binding = 2) uniform Uniforms {
     float time;
     float width;
     float height;
+    float seed;
 };
 
 // Glitch Effect Shader
@@ -17,7 +18,7 @@ layout(set = 0, binding = 2) uniform Uniforms {
 
 // Random number generation
 float random(vec2 st) {
-    return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+    return fract(sin(dot(st.xy + seed, vec2(12.9898, 78.233))) * 43758.5453123);
 }
 
 // Value noise
