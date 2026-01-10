@@ -60,7 +60,7 @@ void main() {
     vec4 original = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
     
     // smoothstep mask for softer transition
-    float alpha = smoothstep(0.00, 0.2, mask);
+    float alpha = smoothstep(0.2, 0.8, mask);
 
     f_color = mix(blurred, original, alpha);
 }

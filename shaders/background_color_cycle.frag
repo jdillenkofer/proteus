@@ -31,7 +31,7 @@ void main() {
 
     // Smoothstep for cleaner edges
     // Adjusted to be more inclusive of the person (0.01 instead of 0.1)
-    mask = smoothstep(0.00, 0.2, mask);
+    mask = smoothstep(0.4, 0.6, mask);
 
     f_color = mix(background_color, person_color, mask);
 }

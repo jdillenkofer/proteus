@@ -43,6 +43,7 @@ void main() {
     vec3 final_color = color.rgb * 0.3; 
     
     // Person: Normal
+    mask = smoothstep(0.4, 0.6, mask);
     final_color = mix(final_color, color.rgb, mask);
     
     // Add Glow (Additive blending)

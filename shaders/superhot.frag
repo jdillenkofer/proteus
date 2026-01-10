@@ -55,5 +55,6 @@ void main() {
     float edge = abs(m_up - m_down) + abs(m_left - m_right);
     fg_color += vec3(1.0, 0.8, 0.0) * edge * 0.5; // Golden rim
 
+    mask = smoothstep(0.4, 0.6, mask);
     f_color = mix(vec4(bg_color, 1.0), vec4(fg_color, 1.0), mask);
 }

@@ -26,7 +26,7 @@ void main() {
     vec4 background_color = texture(sampler2D(t_texture, s_sampler), coord);
 
     // Smoothstep for cleaner edges
-    mask = smoothstep(0.00, 0.2, mask);
+    mask = smoothstep(0.4, 0.6, mask);
 
     f_color = mix(background_color, person_color, mask);
 }

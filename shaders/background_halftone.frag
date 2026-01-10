@@ -17,7 +17,7 @@ void main() {
     float mask = texture(sampler2D(t_mask, s_sampler), v_tex_coords).r;
     vec4 color = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
 
-    mask = smoothstep(0.00, 0.2, mask);
+    mask = smoothstep(0.4, 0.6, mask);
 
     // Grid for halftone dots
     float frequency = 100.0;

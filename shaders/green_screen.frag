@@ -21,7 +21,7 @@ void main() {
     vec4 background_color = vec4(0.0, 1.0, 0.0, 1.0); 
 
     // Smoothstep for cleanup
-    mask = smoothstep(0.00, 0.2, mask);
+    mask = smoothstep(0.4, 0.6, mask);
 
     f_color = mix(background_color, person_color, mask);
 }

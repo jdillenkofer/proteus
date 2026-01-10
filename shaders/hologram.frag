@@ -18,7 +18,7 @@ void main() {
     vec4 color = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
     
     // Make mask generous
-    mask = smoothstep(0.00, 0.2, mask);
+    mask = smoothstep(0.4, 0.6, mask);
 
     // Hologram Effect Calculation
     vec3 holo_tint = vec3(0.0, 1.0, 1.0); // Cyan

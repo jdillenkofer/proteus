@@ -9,8 +9,8 @@ use tracing::{info, warn, debug};
 
 use crate::frame::VideoFrame;
 
-const MODEL_WIDTH: u32 = 128;
-const MODEL_HEIGHT: u32 = 128;
+const MODEL_WIDTH: u32 = 256;
+const MODEL_HEIGHT: u32 = 256;
 
 pub struct SegmentationEngine {
     session: Session,

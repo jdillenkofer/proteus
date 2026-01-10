@@ -85,5 +85,6 @@ void main() {
     // Add rim light
     distorted_color += vec4(0.2, 0.5, 1.0, 0.0) * edge * 2.0;
 
+    mask = smoothstep(0.4, 0.6, mask);
     f_color = mix(bg_color, distorted_color, mask);
 }

@@ -56,5 +56,6 @@ void main() {
     vec3 bg_col = color.rgb * 0.2;
     bg_col = mix(bg_col, vec3(0.0, 0.1, 0.2), 0.5); // Blueprint blue tint
 
+    mask = smoothstep(0.4, 0.6, mask);
     f_color = mix(vec4(bg_col, 1.0), vec4(person_col, 1.0), mask);
 }
