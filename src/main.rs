@@ -63,7 +63,7 @@ struct Args {
     #[arg(long, value_enum, default_value = "window")]
     output: OutputMode,
 
-    /// Enable AI-based person segmentation (requires models/modnet.onnx)
+    /// Enable AI-based person segmentation (requires models/mediapipe_selfie.onnx)
     #[arg(long)]
     segmentation: bool,
 }
