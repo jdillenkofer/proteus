@@ -45,9 +45,10 @@ impl SegmentationEngine {
         Ok(Some(Self { session }))
     }
 
-    /// Run inference on a video frame and return the alpha mask (grayscale 8-bit).
-    /// Resizes the output mask to `target_width` x `target_height`.
-    pub fn predict(&mut self, frame: &VideoFrame, target_width: u32, target_height: u32) -> Result<Vec<u8>> {
+    /// Run inference on a video frame and return the alpha mask (grayscale 8-bit)
+    /// plus the dimensions of the mask.
+    /// Does NOT resize to target dimensions (optimization: let GPU handle it).
+    pub fn predict(&mut self, frame: &VideoFrame) -> Result<(Vec<u8>, u32, u32)> {
         // 1. Convert VideoFrame to DynamicImage
         let img_buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(frame.width, frame.height, frame.data.clone())
             .ok_or_else(|| anyhow!("Failed to create image buffer"))?;
@@ -111,8 +112,6 @@ impl SegmentationEngine {
             for (x, val) in row.iter().enumerate() {
                 let val: f32 = *val;
                 let p = (val.clamp(0.0, 1.0) * 255.0) as u8;
-                // mask_img.put_pixel(x as u32, y as u32, image::Luma([p]));
-                // image::Luma is wrapping a single value
                  let pixel = image::Luma([p]);
                  mask_img.put_pixel(x as u32, y as u32, pixel);
             }
@@ -123,8 +122,6 @@ impl SegmentationEngine {
         // Crop back to valid region
         let mask_cropped = mask_dynamic.crop_imm(x_offset, y_offset, new_width, new_height);
         
-        let mask_resized = mask_cropped.resize_exact(target_width, target_height, FilterType::Triangle);
-        
-        Ok(mask_resized.to_luma8().into_raw())
+        Ok((mask_cropped.to_luma8().into_raw(), new_width, new_height))
     }
 }

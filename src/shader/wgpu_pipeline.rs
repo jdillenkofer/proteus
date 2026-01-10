@@ -379,22 +379,40 @@ impl ShaderPipeline for WgpuPipeline {
 
         // Run segmentation if enabled
         if let Some(engine) = &mut self.segmentation_engine {
-             match engine.predict(&rgba_input, self.output_width, self.output_height) {
-                 Ok(mask_data) => {
+             match engine.predict(&rgba_input) {
+                 Ok((mask_data, width, height)) => {
+                      // Check if texture size matches mask size (Recreate if needed)
+                      if self.mask_texture.width() != width || self.mask_texture.height() != height {
+                          self.mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("Segmentation Mask"),
+                            size: wgpu::Extent3d {
+                                width,
+                                height,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::R8Unorm,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                      }
+
                       // Handle 256-byte alignment for R8 texture (1 byte per pixel)
-                      let width = self.output_width as usize;
-                      let height = self.output_height as usize;
+                      let width_usize = width as usize;
+                      let height_usize = height as usize;
                       let align_mask = 255;
-                      let padded_width = (width + align_mask) & !align_mask;
+                      let padded_width = (width_usize + align_mask) & !align_mask;
                       
-                      let upload_data = if padded_width == width {
+                      let upload_data = if padded_width == width_usize {
                           std::borrow::Cow::Borrowed(&mask_data)
                       } else {
-                          let mut aligned_data = vec![0u8; padded_width * height];
-                          for y in 0..height {
-                              let src_start = y * width;
+                          let mut aligned_data = vec![0u8; padded_width * height_usize];
+                          for y in 0..height_usize {
+                              let src_start = y * width_usize;
                               let dst_start = y * padded_width;
-                              aligned_data[dst_start..dst_start + width].copy_from_slice(&mask_data[src_start..src_start + width]);
+                              aligned_data[dst_start..dst_start + width_usize].copy_from_slice(&mask_data[src_start..src_start + width_usize]);
                           }
                           std::borrow::Cow::Owned(aligned_data)
                       };
@@ -410,11 +428,11 @@ impl ShaderPipeline for WgpuPipeline {
                          wgpu::TexelCopyBufferLayout {
                              offset: 0,
                              bytes_per_row: Some(padded_width as u32),
-                             rows_per_image: Some(self.output_height),
+                             rows_per_image: Some(height),
                          },
                          wgpu::Extent3d {
-                             width: self.output_width,
-                             height: self.output_height,
+                             width,
+                             height,
                              depth_or_array_layers: 1,
                          },
                      );
