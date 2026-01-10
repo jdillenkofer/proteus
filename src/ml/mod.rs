@@ -50,6 +50,16 @@ impl SegmentationEngine {
             ])?;
             info!("CoreML Execution Provider enabled");
         }
+
+        // --- Windows Optimization: DirectML (GPU) ---
+        #[cfg(target_os = "windows")]
+        {
+            use ort::execution_providers::DirectMLExecutionProvider;
+            session_builder = session_builder.with_execution_providers([
+                DirectMLExecutionProvider::default().build()
+            ])?;
+            info!("DirectML Execution Provider enabled (GPU acceleration)");
+        }
     
         let session = session_builder.commit_from_file(model_path)?;
 
