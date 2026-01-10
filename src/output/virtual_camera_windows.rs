@@ -9,12 +9,12 @@ use anyhow::{anyhow, Result};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{debug, info};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
     FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
-use windows::core::PCWSTR;
 
 /// Shared memory name used by OBS Virtual Camera.
 const VIDEO_NAME: &str = "OBSVirtualCamVideo";

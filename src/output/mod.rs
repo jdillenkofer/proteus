@@ -3,11 +3,16 @@
 pub mod window_output;
 
 #[cfg(target_os = "windows")]
+#[path = "virtual_camera_windows.rs"]
+pub mod virtual_camera;
+
+#[cfg(target_os = "linux")]
+#[path = "virtual_camera_linux.rs"]
 pub mod virtual_camera;
 
 pub use window_output::WindowOutput;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub use virtual_camera::{VirtualCameraConfig, VirtualCameraOutput};
 
 use crate::frame::VideoFrame;

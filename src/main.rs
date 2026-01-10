@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use proteus::capture::{CaptureBackend, CaptureConfig, NokhwaCapture};
 use proteus::output::window_output::WindowRenderer;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
 use proteus::shader::{ShaderPipeline, ShaderSource, WgpuPipeline};
 use std::fs;
@@ -23,8 +23,10 @@ use winit::window::{Window, WindowAttributes, WindowId};
 pub enum OutputMode {
     /// Display in a window (default)
     Window,
-    /// Output to virtual camera (Windows only, requires OBS Virtual Camera)
-    #[cfg(target_os = "windows")]
+    /// Output to virtual camera
+    /// - Windows: Requires OBS Virtual Camera
+    /// - Linux: Requires v4l2loopback
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     VirtualCamera,
 }
 
@@ -259,7 +261,7 @@ fn main() -> Result<()> {
     // Dispatch based on output mode
     match args.output {
         OutputMode::Window => run_window_mode(args)?,
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         OutputMode::VirtualCamera => run_virtual_camera_mode(args)?,
     }
 
@@ -277,8 +279,8 @@ fn run_window_mode(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// Run in virtual camera output mode (Windows only).
-#[cfg(target_os = "windows")]
+/// Run in virtual camera output mode.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn run_virtual_camera_mode(args: Args) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
