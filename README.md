@@ -49,6 +49,26 @@ You can apply a custom GLSL fragment shader using the `--shader` or `-s` flag.
 cargo run --release -- --shader shaders/crt.frag
 ```
 
+### ML Segmentation
+
+To use the AI-powered segmentation features (background blur, replacement, etc.), you must first download the segmentation model.
+
+1.  Create a `models` directory in the project root:
+    ```bash
+    mkdir models
+    ```
+2.  Download the **MODNet** model (`modnet_photographic_portrait_matting.onnx`) from the [official repository](https://github.com/ZHKKKe/MODNet/tree/master/pretrained).
+3.  Rename it to `modnet.onnx` and place it in the `models/` folder:
+    ```
+    proteus/
+    ├── models/
+    │   └── modnet.onnx
+    ```
+4.  Run with the `--segmentation` flag:
+    ```bash
+    cargo run --release -- --segmentation --shader shaders/background_blur.frag
+    ```
+
 ### Chaining Shaders
 
 You can chain multiple shaders together by specifying the `-s` flag multiple times. The output of one shader becomes the input of the next.
