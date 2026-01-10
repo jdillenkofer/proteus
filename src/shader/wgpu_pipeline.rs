@@ -64,11 +64,13 @@ pub struct WgpuPipeline {
     sampler: wgpu::Sampler,
     output_width: u32,
     output_height: u32,
+    segmentation_engine: Option<crate::ml::SegmentationEngine>,
+    mask_texture: wgpu::Texture,
 }
 
 impl WgpuPipeline {
     /// Creates a new wgpu pipeline with the given shaders.
-    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>) -> Result<Self> {
+    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>, segmentation: bool) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -140,6 +142,16 @@ impl WgpuPipeline {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -232,6 +244,62 @@ impl WgpuPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Initialize segmentation engine if requested
+        let segmentation_engine = if segmentation {
+             match crate::ml::SegmentationEngine::new()? {
+                 Some(engine) => Some(engine),
+                 None => {
+                     // Warning already logged by engine
+                     None
+                 }
+             }
+        } else {
+            None
+        };
+
+        // Create Mask Texture
+        // If segmentation is ON: format R8Unorm (grayscale)
+        // If OFF: Default to BLACK 1x1 texture (value 0.0) -> "Blur Everything"
+        
+        let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Segmentation Mask"),
+            size: wgpu::Extent3d {
+                width: if segmentation_engine.is_some() { width } else { 1 },
+                height: if segmentation_engine.is_some() { height } else { 1 },
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm, // Single channel
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Initialize mask to BLACK (0.0) by default
+        // A black mask means "Background/Simulated Blur" for everything.
+        // A white mask means "Person/Sharp". 
+        // 0x00 = 0
+        queue.write_texture(
+             wgpu::TexelCopyTextureInfo {
+                texture: &mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8], // Single black pixel
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
         Ok(Self {
             device,
             queue,
@@ -243,6 +311,8 @@ impl WgpuPipeline {
             sampler,
             output_width: width,
             output_height: height,
+            segmentation_engine,
+            mask_texture,
         })
     }
 
@@ -306,6 +376,54 @@ impl ShaderPipeline for WgpuPipeline {
 
         // Convert to RGBA if needed
         let rgba_input = input.to_rgba();
+
+        // Run segmentation if enabled
+        if let Some(engine) = &mut self.segmentation_engine {
+             match engine.predict(&rgba_input, self.output_width, self.output_height) {
+                 Ok(mask_data) => {
+                      // Handle 256-byte alignment for R8 texture (1 byte per pixel)
+                      let width = self.output_width as usize;
+                      let height = self.output_height as usize;
+                      let align_mask = 255;
+                      let padded_width = (width + align_mask) & !align_mask;
+                      
+                      let upload_data = if padded_width == width {
+                          std::borrow::Cow::Borrowed(&mask_data)
+                      } else {
+                          let mut aligned_data = vec![0u8; padded_width * height];
+                          for y in 0..height {
+                              let src_start = y * width;
+                              let dst_start = y * padded_width;
+                              aligned_data[dst_start..dst_start + width].copy_from_slice(&mask_data[src_start..src_start + width]);
+                          }
+                          std::borrow::Cow::Owned(aligned_data)
+                      };
+
+                      self.queue.write_texture(
+                         wgpu::TexelCopyTextureInfo {
+                             texture: &self.mask_texture,
+                             mip_level: 0,
+                             origin: wgpu::Origin3d::ZERO,
+                             aspect: wgpu::TextureAspect::All,
+                         },
+                         &upload_data,
+                         wgpu::TexelCopyBufferLayout {
+                             offset: 0,
+                             bytes_per_row: Some(padded_width as u32),
+                             rows_per_image: Some(self.output_height),
+                         },
+                         wgpu::Extent3d {
+                             width: self.output_width,
+                             height: self.output_height,
+                             depth_or_array_layers: 1,
+                         },
+                     );
+                 }
+                 Err(e) => {
+                     tracing::warn!("Segmentation inference failed: {}", e);
+                 }
+             }
+        }
 
         // Create input texture from the video frame
         let mut frames = Vec::new();
@@ -396,6 +514,10 @@ impl ShaderPipeline for WgpuPipeline {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: self.uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.mask_texture.create_view(&wgpu::TextureViewDescriptor::default())),
                     },
                 ],
             });

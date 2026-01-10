@@ -62,6 +62,10 @@ struct Args {
     /// Output mode: window or virtual-camera
     #[arg(long, value_enum, default_value = "window")]
     output: OutputMode,
+
+    /// Enable AI-based person segmentation (requires models/modnet.onnx)
+    #[arg(long)]
+    segmentation: bool,
 }
 
 /// Application state for the event loop.
@@ -118,7 +122,7 @@ impl ProteusApp {
         }
 
         // Initialize shader pipeline
-        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders)?);
+        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders, self.args.segmentation)?);
         info!("Shader pipeline initialized");
 
         Ok(())
@@ -244,6 +248,15 @@ fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
+    // Initialize ONNX Runtime
+    // We ignore errors here because if ML is not used/model missing, we might survive?
+    // But if we want auto-download or proper setup, we should check it.
+    // However, if the user doesn't use segmentation, we don't want to crash?
+    // But the error happens when loading the dylib.
+    if let Err(e) = proteus::ml::SegmentationEngine::init() {
+        tracing::warn!("Failed to initialize ONNX Runtime: {}. Segmentation will be unavailable.", e);
+    }
+
     let args = Args::parse();
 
     // List devices mode
@@ -324,7 +337,7 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
     }
 
     // Initialize shader pipeline
-    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders)?;
+    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders, args.segmentation)?;
     info!("Shader pipeline initialized");
 
     // Initialize virtual camera output
