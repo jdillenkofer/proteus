@@ -7,6 +7,7 @@ use naga::front::glsl::{Frontend, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use naga::ShaderStage;
 use std::borrow::Cow;
+use tracing::info;
 use wgpu::util::DeviceExt;
 
 /// Default vertex shader in WGSL.
@@ -66,6 +67,16 @@ pub struct WgpuPipeline {
     output_height: u32,
     segmentation_engine: Option<crate::ml::SegmentationEngine>,
     mask_texture: wgpu::Texture,
+
+    // Performance Cache
+    input_texture: Option<wgpu::Texture>,
+    output_textures: Vec<wgpu::Texture>,
+    readback_buffer: Option<wgpu::Buffer>,
+    bind_groups: Vec<wgpu::BindGroup>,
+    cached_width: u32,
+    cached_height: u32,
+    cached_mask_width: u32,
+    cached_mask_height: u32,
 }
 
 impl WgpuPipeline {
@@ -94,7 +105,6 @@ impl WgpuPipeline {
         ))?;
 
         // Prepare shader sources
-        // If no shaders provided, use default passthrough
         let shader_sources = if shaders.is_empty() {
             vec![(DEFAULT_FRAGMENT_SHADER.to_string(), "fs_main")]
         } else {
@@ -115,7 +125,7 @@ impl WgpuPipeline {
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(VERTEX_SHADER)),
         });
 
-        // Create bind group layout (shared for all pipelines if they use the same layout)
+        // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Texture Bind Group Layout"),
             entries: &[
@@ -165,7 +175,6 @@ impl WgpuPipeline {
         });
 
         let mut render_pipelines = Vec::new();
-
         for (i, (fragment_wgsl, fragment_entry_point)) in shader_sources.into_iter().enumerate() {
             let fragment_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&format!("Fragment Shader {}", i)),
@@ -222,45 +231,32 @@ impl WgpuPipeline {
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Texture Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
-        // Create uniform buffer
         let uniforms = Uniforms {
             time: 0.0,
             width: width as f32,
             height: height as f32,
             seed: 0.0,
         };
-
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
             contents: bytemuck::cast_slice(&[uniforms]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Initialize segmentation engine if requested
         let segmentation_engine = if segmentation {
              match crate::ml::SegmentationEngine::new()? {
                  Some(engine) => Some(engine),
-                 None => {
-                     // Warning already logged by engine
-                     None
-                 }
+                 None => None
              }
         } else {
             None
         };
 
-        // Create Mask Texture
-        // If segmentation is ON: format R8Unorm (grayscale)
-        // If OFF: Default to BLACK 1x1 texture (value 0.0) -> "Blur Everything"
-        
         let mask_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Segmentation Mask"),
             size: wgpu::Extent3d {
@@ -271,15 +267,11 @@ impl WgpuPipeline {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm, // Single channel
+            format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
-        // Initialize mask to BLACK (0.0) by default
-        // A black mask means "Background/Simulated Blur" for everything.
-        // A white mask means "Person/Sharp". 
-        // 0x00 = 0
         queue.write_texture(
              wgpu::TexelCopyTextureInfo {
                 texture: &mask_texture,
@@ -287,17 +279,13 @@ impl WgpuPipeline {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &[0u8], // Single black pixel
+            &[255u8], // Default to WHITE (1.0) so person is visible if ML off
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(1),
                 rows_per_image: Some(1),
             },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
 
         Ok(Self {
@@ -313,190 +301,58 @@ impl WgpuPipeline {
             output_height: height,
             segmentation_engine,
             mask_texture,
+            input_texture: None,
+            output_textures: Vec::new(),
+            readback_buffer: None,
+            bind_groups: Vec::new(),
+            cached_width: 0,
+            cached_height: 0,
+            cached_mask_width: 0,
+            cached_mask_height: 0,
         })
     }
 
-
-    /// Converts GLSL fragment shader to WGSL.
-    fn glsl_to_wgsl(glsl: &str) -> Result<String> {
-        let mut frontend = Frontend::default();
-        let options = Options::from(ShaderStage::Fragment);
-        
-        let module = frontend
-            .parse(&options, glsl)
-            .map_err(|e| anyhow!("GLSL parse error: {:?}", e))?;
-
-        let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
-        let info = validator
-            .validate(&module)
-            .map_err(|e| anyhow!("Shader validation error: {:?}", e))?;
-
-        let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
-            .map_err(|e| anyhow!("WGSL generation error: {:?}", e))?;
-
-        Ok(wgsl)
-    }
-
-    /// Returns the device and queue for external use (e.g., window output).
-    pub fn device_and_queue(&self) -> (&wgpu::Device, &wgpu::Queue) {
-        (&self.device, &self.queue)
-    }
-
-    /// Returns the render pipelines for external use.
-    pub fn render_pipelines(&self) -> &[wgpu::RenderPipeline] {
-        &self.render_pipelines
-    }
-
-    /// Returns the bind group layout.
-    pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.bind_group_layout
-    }
-
-    /// Returns the vertex and index buffers.
-    pub fn buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
-        (&self.vertex_buffer, &self.index_buffer)
-    }
-
-    /// Returns the sampler.
-    pub fn sampler(&self) -> &wgpu::Sampler {
-        &self.sampler
-    }
-}
-
-impl ShaderPipeline for WgpuPipeline {
-    fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
-        // Update uniform buffer
-        let uniforms = Uniforms {
-            time,
-            width: self.output_width as f32,
-            height: self.output_height as f32,
-            seed: rand::random::<f32>(),
-        };
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-        // Convert to RGBA if needed
-        let rgba_input = input.to_rgba();
-
-        // Run segmentation if enabled
-        if let Some(engine) = &mut self.segmentation_engine {
-             match engine.predict(&rgba_input) {
-                 Ok((mask_data, width, height)) => {
-                      // Check if texture size matches mask size (Recreate if needed)
-                      if self.mask_texture.width() != width || self.mask_texture.height() != height {
-                          self.mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("Segmentation Mask"),
-                            size: wgpu::Extent3d {
-                                width,
-                                height,
-                                depth_or_array_layers: 1,
-                            },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::R8Unorm,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            view_formats: &[],
-                        });
-                      }
-
-                      // Handle 256-byte alignment for R8 texture (1 byte per pixel)
-                      let width_usize = width as usize;
-                      let height_usize = height as usize;
-                      let align_mask = 255;
-                      let padded_width = (width_usize + align_mask) & !align_mask;
-                      
-                      let upload_data = if padded_width == width_usize {
-                          std::borrow::Cow::Borrowed(&mask_data)
-                      } else {
-                          let mut aligned_data = vec![0u8; padded_width * height_usize];
-                          for y in 0..height_usize {
-                              let src_start = y * width_usize;
-                              let dst_start = y * padded_width;
-                              aligned_data[dst_start..dst_start + width_usize].copy_from_slice(&mask_data[src_start..src_start + width_usize]);
-                          }
-                          std::borrow::Cow::Owned(aligned_data)
-                      };
-
-                      self.queue.write_texture(
-                         wgpu::TexelCopyTextureInfo {
-                             texture: &self.mask_texture,
-                             mip_level: 0,
-                             origin: wgpu::Origin3d::ZERO,
-                             aspect: wgpu::TextureAspect::All,
-                         },
-                         &upload_data,
-                         wgpu::TexelCopyBufferLayout {
-                             offset: 0,
-                             bytes_per_row: Some(padded_width as u32),
-                             rows_per_image: Some(height),
-                         },
-                         wgpu::Extent3d {
-                             width,
-                             height,
-                             depth_or_array_layers: 1,
-                         },
-                     );
-                 }
-                 Err(e) => {
-                     tracing::warn!("Segmentation inference failed: {}", e);
-                 }
-             }
+    /// Update or create cached textures/buffers if dimensions changed
+    fn ensure_resources(&mut self, width: u32, height: u32, mask_w: u32, mask_h: u32) -> Result<()> {
+        if self.cached_width == width && self.cached_height == height 
+           && self.cached_mask_width == mask_w && self.cached_mask_height == mask_h {
+            return Ok(());
         }
 
-        // Create input texture from the video frame
-        let mut frames = Vec::new();
+        info!("Creating GPU resources (Frame: {}x{}, Mask: {}x{})", width, height, mask_w, mask_h);
         
-        let initial_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Initial Input Texture"),
-            size: wgpu::Extent3d {
-                width: rgba_input.width,
-                height: rgba_input.height,
-                depth_or_array_layers: 1,
-            },
+        // 1. Mask Texture (Create if size changed)
+        if self.cached_mask_width != mask_w || self.cached_mask_height != mask_h {
+            self.mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Segmentation Mask"),
+                size: wgpu::Extent3d { width: mask_w, height: mask_h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+        }
+
+        // 2. Input Texture
+        self.input_texture = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Input Texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
-        });
+        }));
 
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &initial_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &rgba_input.data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(rgba_input.width * 4),
-                rows_per_image: Some(rgba_input.height),
-            },
-            wgpu::Extent3d {
-                width: rgba_input.width,
-                height: rgba_input.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        
-        frames.push(initial_texture);
-
-        // Process through all pipelines
-        // we need N render passes
-        // Pass 0: Initial Texture -> Texture 1
-        // Pass 1: Texture 1 -> Texture 2
-        // ...
-        
+        // 2. Output Textures (Intermediate frames)
+        self.output_textures.clear();
         for i in 0..self.render_pipelines.len() {
-             let output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("Output Texture {}", i)),
-                size: wgpu::Extent3d {
-                    width: self.output_width,
-                    height: self.output_height,
-                    depth_or_array_layers: 1,
-                },
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("Intermediate Texture {}", i)),
+                size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -504,41 +360,131 @@ impl ShaderPipeline for WgpuPipeline {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            frames.push(output_texture);
+            self.output_textures.push(tex);
         }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        // 3. Readback Buffer
+        let size = (self.output_width * self.output_height * 4) as wgpu::BufferAddress;
+        self.readback_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Readback Buffer"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }));
 
-        for (i, pipeline) in self.render_pipelines.iter().enumerate() {
-            let input_view = frames[i].create_view(&wgpu::TextureViewDescriptor::default());
-            let output_view = frames[i+1].create_view(&wgpu::TextureViewDescriptor::default());
+        // 4. Bind Groups
+        self.bind_groups.clear();
+        let mask_view = self.mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        for i in 0..self.render_pipelines.len() {
+            let input_view = if i == 0 {
+                self.input_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())
+            } else {
+                self.output_textures[i-1].create_view(&wgpu::TextureViewDescriptor::default())
+            };
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&format!("Bind Group {}", i)),
                 layout: &self.bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&input_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.mask_texture.create_view(&wgpu::TextureViewDescriptor::default())),
-                    },
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mask_view) },
                 ],
             });
+            self.bind_groups.push(bind_group);
+        }
+
+        self.cached_width = width;
+        self.cached_height = height;
+        self.cached_mask_width = mask_w;
+        self.cached_mask_height = mask_h;
+        Ok(())
+    }
+
+    /// Converts GLSL fragment shader to WGSL.
+    fn glsl_to_wgsl(glsl: &str) -> Result<String> {
+        let mut frontend = Frontend::default();
+        let options = Options::from(ShaderStage::Fragment);
+        let module = frontend.parse(&options, glsl).map_err(|e| anyhow!("GLSL parse error: {:?}", e))?;
+        let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
+        let info = validator.validate(&module).map_err(|e| anyhow!("Shader validation error: {:?}", e))?;
+        let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty()).map_err(|e| anyhow!("WGSL generation error: {:?}", e))?;
+        Ok(wgsl)
+    }
+
+    pub fn device_and_queue(&self) -> (&wgpu::Device, &wgpu::Queue) { (&self.device, &self.queue) }
+    pub fn render_pipelines(&self) -> &[wgpu::RenderPipeline] { &self.render_pipelines }
+    pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout { &self.bind_group_layout }
+    pub fn buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer) { (&self.vertex_buffer, &self.index_buffer) }
+    pub fn sampler(&self) -> &wgpu::Sampler { &self.sampler }
+}
+
+impl ShaderPipeline for WgpuPipeline {
+    fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
+        let start = std::time::Instant::now();
+        let rgba_input = input.to_rgba();
+
+        // 1. Run segmentation first to get mask size
+        let mut mask_result = None;
+        if let Some(engine) = &mut self.segmentation_engine {
+             let ml_start = std::time::Instant::now();
+             match engine.predict(&rgba_input) {
+                 Ok((data, w, h)) => {
+                      tracing::info!("  [Perf] ML Inference: {:?}", ml_start.elapsed());
+                      mask_result = Some((data, w, h));
+                 }
+                 Err(e) => tracing::warn!("Segmentation inference failed: {}", e),
+             }
+        }
+
+        // 2. Ensure resources are allocated for current frame and mask
+        let (mask_w, mask_h) = if let Some((_, w, h)) = &mask_result { (*w, *h) } else { (1, 1) };
+        self.ensure_resources(rgba_input.width, rgba_input.height, mask_w, mask_h)?;
+        
+        // 3. Update uniform buffer
+        let uniforms = Uniforms { time, width: self.output_width as f32, height: self.output_height as f32, seed: rand::random::<f32>() };
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // 4. Upload Mask
+        if let Some((mask_data, w, h)) = mask_result {
+            let align_mask = 255;
+            let padded_width = (w as usize + align_mask) & !align_mask;
+            let upload_data = if padded_width == w as usize {
+                std::borrow::Cow::Borrowed(&mask_data)
+            } else {
+                let mut aligned = vec![0u8; padded_width * h as usize];
+                for y in 0..h as usize {
+                        let src = y * w as usize;
+                        let dst = y * padded_width;
+                        aligned[dst..dst + w as usize].copy_from_slice(&mask_data[src..src+w as usize]);
+                }
+                std::borrow::Cow::Owned(aligned)
+            };
+
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &self.mask_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &upload_data,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_width as u32), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+
+        let upload_start = std::time::Instant::now();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: self.input_texture.as_ref().unwrap(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &rgba_input.data,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rgba_input.width * 4), rows_per_image: Some(rgba_input.height) },
+            wgpu::Extent3d { width: rgba_input.width, height: rgba_input.height, depth_or_array_layers: 1 },
+        );
+        tracing::info!("  [Perf] Texture Upload: {:?}", upload_start.elapsed());
+
+        let shader_start = std::time::Instant::now();
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
+
+        for (i, pipeline) in self.render_pipelines.iter().enumerate() {
+            let output_view = self.output_textures[i].create_view(&wgpu::TextureViewDescriptor::default());
 
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -546,10 +492,7 @@ impl ShaderPipeline for WgpuPipeline {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &output_view,
                         resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                         depth_slice: None,
                     })],
                     depth_stencil_attachment: None,
@@ -559,70 +502,38 @@ impl ShaderPipeline for WgpuPipeline {
                 });
 
                 render_pass.set_pipeline(pipeline);
-                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.set_bind_group(0, &self.bind_groups[i], &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..6, 0, 0..1);
             }
         }
 
-        // Copy final output to buffer
-        let final_texture = frames.last().unwrap();
-        let output_buffer_size =
-            (self.output_width * self.output_height * 4) as wgpu::BufferAddress;
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Buffer"),
-            size: output_buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
+        let final_texture = self.output_textures.last().unwrap();
         encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: final_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.output_width * 4),
-                    rows_per_image: Some(self.output_height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.output_width,
-                height: self.output_height,
-                depth_or_array_layers: 1,
-            },
+            wgpu::TexelCopyTextureInfo { texture: final_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: self.readback_buffer.as_ref().unwrap(), layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.output_width * 4), rows_per_image: Some(self.output_height) } },
+            wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        tracing::info!("  [Perf] Shader Dispatch: {:?}", shader_start.elapsed());
 
-        // Read back the output
-        let buffer_slice = output_buffer.slice(..);
+        let readback_start = std::time::Instant::now();
+        let buffer_slice = self.readback_buffer.as_ref().unwrap().slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        }).unwrap();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| sender.send(result).unwrap());
+        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         receiver.recv()??;
 
         let data = buffer_slice.get_mapped_range();
         let output_data = data.to_vec();
         drop(data);
-        output_buffer.unmap();
+        self.readback_buffer.as_ref().unwrap().unmap();
+        
+        tracing::info!("  [Perf] GPU Readback: {:?}", readback_start.elapsed());
+        tracing::info!("  [Perf] TOTAL FRAME: {:?}", start.elapsed());
 
-        Ok(VideoFrame::from_data(
-            self.output_width,
-            self.output_height,
-            PixelFormat::Rgba,
-            output_data,
-        ))
+        Ok(VideoFrame::from_data(self.output_width, self.output_height, PixelFormat::Rgba, output_data))
     }
 }

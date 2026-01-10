@@ -19,6 +19,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 rand = "0.9"
 ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "2.0.0-rc.9", features = ["ndarray", "coreml"] }
 image = "0.25"
 ndarray = "0.15"
 

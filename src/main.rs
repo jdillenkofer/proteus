@@ -78,6 +78,8 @@ struct ProteusApp {
     last_frame_time: Instant,
     frame_duration: Duration,
     start_time: Instant,
+    frame_count: u32,
+    fps_last_time: Instant,
 }
 
 impl ProteusApp {
@@ -92,6 +94,8 @@ impl ProteusApp {
             last_frame_time: Instant::now(),
             frame_duration,
             start_time: Instant::now(),
+            frame_count: 0,
+            fps_last_time: Instant::now(),
         }
     }
 
@@ -105,8 +109,10 @@ impl ProteusApp {
         };
 
         info!("Opening camera device {}...", self.args.input);
-        self.capture = Some(NokhwaCapture::open(config)?);
-        info!("Camera opened successfully");
+        let capture = NokhwaCapture::open(config)?;
+        let (cam_w, cam_h) = capture.frame_size();
+        info!("Camera opened successfully at {}x{}", cam_w, cam_h);
+        self.capture = Some(capture);
 
         // Load shaders if provided
         let mut shaders = Vec::new();
@@ -138,6 +144,15 @@ impl ProteusApp {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
+
+        self.frame_count += 1;
+        let elapsed = self.fps_last_time.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            let fps = self.frame_count as f32 / elapsed.as_secs_f32();
+            info!("Performance: Rendering at {:.2} FPS (Resolution: {}x{})", fps, self.args.width, self.args.height);
+            self.frame_count = 0;
+            self.fps_last_time = Instant::now();
+        }
 
         // Capture frame
         match capture.capture_frame() {
