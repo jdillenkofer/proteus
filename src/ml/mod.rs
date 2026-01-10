@@ -3,13 +3,14 @@ use image::{imageops::FilterType, DynamicImage, ImageBuffer, Luma, Rgba};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
 use std::path::Path;
-use tracing::{info, warn};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use tracing::{info, warn, debug};
 
 use crate::frame::VideoFrame;
 
-/// MODNet input size (reduced to 256 for high speed).
-const MODEL_WIDTH: u32 = 256;
-const MODEL_HEIGHT: u32 = 256;
+const MODEL_WIDTH: u32 = 128;
+const MODEL_HEIGHT: u32 = 128;
 
 pub struct SegmentationEngine {
     session: Session,
@@ -113,5 +114,69 @@ impl SegmentationEngine {
         let mask_cropped = DynamicImage::ImageLuma8(mask_img).crop_imm(x_offset, y_offset, new_width, new_height);
         
         Ok((mask_cropped.into_luma8().into_raw(), new_width, new_height))
+    }
+}
+
+/// A background-threaded wrapper for the segmentation engine.
+pub struct AsyncSegmentationEngine {
+    frame_tx: mpsc::SyncSender<VideoFrame>,
+    mask_rx: Receiver<(Vec<u8>, u32, u32)>,
+}
+
+impl AsyncSegmentationEngine {
+    pub fn new() -> Result<Option<Self>> {
+        let mut engine_opt = SegmentationEngine::new()?;
+        let Some(mut engine) = engine_opt.take() else {
+            return Ok(None);
+        };
+
+        // Use a bounded channel of size 1 to implement "drop-if-busy"
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<VideoFrame>(1);
+        let (mask_tx, mask_rx) = mpsc::channel::<(Vec<u8>, u32, u32)>();
+
+        thread::spawn(move || {
+            info!("ML Worker Thread started (Zero-Backpressure mode)");
+            while let Ok(frame) = frame_rx.recv() {
+                let start = std::time::Instant::now();
+                match engine.predict(&frame) {
+                    Ok(result) => {
+                        debug!("ML Worker Inference: {:?}", start.elapsed());
+                        if mask_tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => warn!("ML Worker error: {}", e),
+                }
+                // Clear any "stale" frames that might have queued up during processing
+                // (Though with size 1, there's at most one stale frame).
+                // Actually, the sync_channel(1) + try_send already handles this.
+            }
+            info!("ML Worker Thread exiting");
+        });
+
+        Ok(Some(Self { frame_tx, mask_rx }))
+    }
+
+    /// Try to send a frame for processing. Returns true if sent, false if busy.
+    pub fn try_predict(&self, frame: VideoFrame) -> bool {
+        match self.frame_tx.try_send(frame) {
+            Ok(_) => true,
+            Err(e) => {
+                if let mpsc::TrySendError::Full(_) = e {
+                    debug!("ML Worker busy, dropping frame to maintain real-time sync");
+                }
+                false
+            }
+        }
+    }
+
+    /// Get the latest available result from the background thread.
+    pub fn poll_result(&self) -> Option<(Vec<u8>, u32, u32)> {
+        let mut latest = None;
+        // Drain the channel to get the MOST RECENT result
+        while let Ok(result) = self.mask_rx.try_recv() {
+            latest = Some(result);
+        }
+        latest
     }
 }

@@ -65,7 +65,7 @@ pub struct WgpuPipeline {
     sampler: wgpu::Sampler,
     output_width: u32,
     output_height: u32,
-    segmentation_engine: Option<crate::ml::SegmentationEngine>,
+    segmentation_engine: Option<crate::ml::AsyncSegmentationEngine>,
     mask_texture: wgpu::Texture,
 
     // Performance Cache
@@ -77,6 +77,7 @@ pub struct WgpuPipeline {
     cached_height: u32,
     cached_mask_width: u32,
     cached_mask_height: u32,
+    frame_count: u64,
 }
 
 impl WgpuPipeline {
@@ -249,10 +250,7 @@ impl WgpuPipeline {
         });
 
         let segmentation_engine = if segmentation {
-             match crate::ml::SegmentationEngine::new()? {
-                 Some(engine) => Some(engine),
-                 None => None
-             }
+             crate::ml::AsyncSegmentationEngine::new()?
         } else {
             None
         };
@@ -309,6 +307,7 @@ impl WgpuPipeline {
             cached_height: 0,
             cached_mask_width: 0,
             cached_mask_height: 0,
+            frame_count: 0,
         })
     }
 
@@ -425,23 +424,27 @@ impl ShaderPipeline for WgpuPipeline {
     fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
         let start = std::time::Instant::now();
         let rgba_input = input.to_rgba();
+        self.frame_count += 1;
 
-        // 1. Run segmentation first to get mask size
-        let mut mask_result = None;
+        // 1. Try to send frame to ML worker (Non-blocking)
         if let Some(engine) = &mut self.segmentation_engine {
-             let ml_start = std::time::Instant::now();
-             match engine.predict(&rgba_input) {
-                 Ok((data, w, h)) => {
-                      tracing::info!("  [Perf] ML Inference: {:?}", ml_start.elapsed());
-                      mask_result = Some((data, w, h));
-                 }
-                 Err(e) => tracing::warn!("Segmentation inference failed: {}", e),
-             }
+            engine.try_predict(rgba_input.clone());
         }
 
-        // 2. Ensure resources are allocated for current frame and mask
-        let (mask_w, mask_h) = if let Some((_, w, h)) = &mask_result { (*w, *h) } else { (1, 1) };
-        self.ensure_resources(rgba_input.width, rgba_input.height, mask_w, mask_h)?;
+        // 2. Poll for latest mask result
+        let mut mask_result = None;
+        if let Some(engine) = &mut self.segmentation_engine {
+             mask_result = engine.poll_result();
+        }
+
+        // 3. Ensure resources (base size 1280x720, mask size varies)
+        // If no new mask was polled, we just reuse the old sizes so ensure_resources does nothing.
+        let (mask_w, mask_h) = if let Some((_, w, h)) = &mask_result { (*w, *h) } else { (self.cached_mask_width, self.cached_mask_height) };
+        // Initial case: if everything is 0, default to 1x1
+        let final_mask_w = if mask_w == 0 { 1 } else { mask_w };
+        let final_mask_h = if mask_h == 0 { 1 } else { mask_h };
+
+        self.ensure_resources(rgba_input.width, rgba_input.height, final_mask_w, final_mask_h)?;
         
         // 3. Update uniform buffer
         let uniforms = Uniforms { time, width: self.output_width as f32, height: self.output_height as f32, seed: rand::random::<f32>() };
