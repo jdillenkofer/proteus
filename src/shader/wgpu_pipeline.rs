@@ -514,7 +514,7 @@ impl ShaderPipeline for WgpuPipeline {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rgba_input.width * 4), rows_per_image: Some(rgba_input.height) },
             wgpu::Extent3d { width: rgba_input.width, height: rgba_input.height, depth_or_array_layers: 1 },
         );
-        tracing::info!("  [Perf] Texture Upload: {:?}", upload_start.elapsed());
+        tracing::debug!("  [Perf] Texture Upload: {:?}", upload_start.elapsed());
 
         let shader_start = std::time::Instant::now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
@@ -553,7 +553,7 @@ impl ShaderPipeline for WgpuPipeline {
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        tracing::info!("  [Perf] Shader Dispatch: {:?}", shader_start.elapsed());
+        tracing::debug!("  [Perf] Shader Dispatch: {:?}", shader_start.elapsed());
 
         let readback_start = std::time::Instant::now();
         let buffer_slice = self.readback_buffer.as_ref().unwrap().slice(..);
@@ -567,8 +567,8 @@ impl ShaderPipeline for WgpuPipeline {
         drop(data);
         self.readback_buffer.as_ref().unwrap().unmap();
         
-        tracing::info!("  [Perf] GPU Readback: {:?}", readback_start.elapsed());
-        tracing::info!("  [Perf] TOTAL FRAME: {:?}", start.elapsed());
+        tracing::debug!("  [Perf] GPU Readback: {:?}", readback_start.elapsed());
+        tracing::debug!("  [Perf] TOTAL FRAME: {:?}", start.elapsed());
 
         Ok(VideoFrame::from_data(self.output_width, self.output_height, PixelFormat::Rgba, output_data))
     }

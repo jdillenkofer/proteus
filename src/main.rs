@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -145,7 +145,7 @@ impl ProteusApp {
         let elapsed = self.fps_last_time.elapsed();
         if elapsed >= Duration::from_secs(1) {
             let fps = self.frame_count as f32 / elapsed.as_secs_f32();
-            info!("Performance: Rendering at {:.2} FPS (Resolution: {}x{})", fps, self.args.width, self.args.height);
+            debug!("[Perf] Rendering at {:.2} FPS (Resolution: {}x{})", fps, self.args.width, self.args.height);
             self.frame_count = 0;
             self.fps_last_time = Instant::now();
         }
