@@ -355,6 +355,7 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
         width: args.width,
         height: args.height,
         fps: args.fps,
+        ..Default::default()
     };
     let mut output = VirtualCameraOutput::new(vc_config)?;
     info!("Virtual camera output initialized");

@@ -62,6 +62,33 @@ impl SegmentationEngine {
             ])?;
             info!("DirectML Execution Provider enabled (GPU acceleration)");
         }
+
+        // --- Linux Optimization: CUDA / ROCm (GPU) ---
+        #[cfg(target_os = "linux")]
+        {
+            #[allow(unused_mut)]
+            let mut providers = Vec::new();
+
+            #[cfg(feature = "cuda")]
+            {
+                use ort::ep::CUDAExecutionProvider;
+                let p = CUDAExecutionProvider::default().build();
+                providers.push(p);
+                info!("CUDA Execution Provider registered");
+            }
+
+            #[cfg(feature = "rocm")]
+            {
+                use ort::ep::ROCmExecutionProvider;
+                let p = ROCmExecutionProvider::default().build();
+                providers.push(p);
+                info!("ROCm Execution Provider registered");
+            }
+            
+            if !providers.is_empty() {
+                 session_builder = session_builder.with_execution_providers(providers)?;
+            }
+        }
     
         let session = session_builder.commit_from_file(model_path)?;
 

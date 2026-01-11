@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Cross-platform shader webcam transformer"
 
+[features]
+default = ["cuda", "rocm"]
+cuda = ["ort/cuda"]
+rocm = ["ort/rocm"]
+
 [dependencies]
 wgpu = "28"
 winit = "0.30"
