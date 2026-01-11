@@ -29,34 +29,34 @@ impl CaptureBackend for NokhwaCapture {
     fn open(config: CaptureConfig) -> Result<Self> {      
         // 1. Initialize logic: Try multiple "seed" formats to establish connection
         // Some cameras are very picky and will reject "Closest" if the hint doesn't match roughly what they support.
-        // Prioritize high quality (1080p) and failover to lower resolutions/framerates.
-        // MJPEG is preferred for high resolutions due to USB bandwidth limits.
+        // 
+        // NOTE: macOS FaceTime cameras typically DON'T support MJPEG, they use NV12/YUYV.
+        // USB webcams on all platforms typically support MJPEG for high resolutions.
+        // We try uncompressed high-res first (for macOS built-in), then MJPEG (for USB cameras).
         let seed_formats = vec![
-            // Full HD MJPEG 30fps
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 30),
-            // Full HD 25fps (PAL)
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 25),
-            // Full HD 15fps
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 15),
+            // === High-res uncompressed (macOS FaceTime cameras, some USB cameras) ===
+            // NV12 is the native format for many macOS cameras
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 30),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::NV12, 30),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::YUYV, 30),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 30),
             
-            // HD MJPEG 30fps
+            // === MJPEG (USB webcams - hardware compressed, lower bandwidth) ===
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 30),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 25),
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30),
-            // HD 25fps
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 25),
-            // HD 15fps
+            
+            // === Lower FPS variants (for bandwidth-constrained scenarios) ===
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 15),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::NV12, 15),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 15),
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 15),
             
-            // VGA MJPEG 30fps
-            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30),
-            // VGA 25fps
-            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 25),
-            // VGA 15fps
-            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 15),
-
-            // YUYV Fallbacks (Uncompressed, usually reliable at low res)
+            // === VGA fallbacks (last resort) ===
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::NV12, 30),
             CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 30),
-            CameraFormat::new(Resolution::new(640, 480), FrameFormat::YUYV, 25),
-            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 30), // Often fails on USB 2.0 but worth a shot as last resort
+            CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30),
         ];
 
         let mut camera = None;
