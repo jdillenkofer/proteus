@@ -7,6 +7,7 @@ use naga::front::glsl::{Frontend, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use naga::ShaderStage;
 use std::borrow::Cow;
+use std::path::Path;
 use tracing::info;
 use wgpu::util::DeviceExt;
 
@@ -67,6 +68,7 @@ pub struct WgpuPipeline {
     output_height: u32,
     segmentation_engine: Option<crate::ml::AsyncSegmentationEngine>,
     mask_texture: wgpu::Texture,
+    image_textures: [wgpu::Texture; 4],
 
     // Performance Cache
     input_texture: Option<wgpu::Texture>,
@@ -83,7 +85,8 @@ pub struct WgpuPipeline {
 impl WgpuPipeline {
     /// Creates a new wgpu pipeline with the given shaders.
     /// Segmentation is automatically enabled if any shader uses the mask binding (binding 3).
-    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>) -> Result<Self> {
+    /// Image paths (up to 4) are loaded as textures for bindings 4-7.
+    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>, image_paths: Vec<impl AsRef<Path>>) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -173,6 +176,47 @@ impl WgpuPipeline {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Image textures (t_image0 through t_image3)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -301,6 +345,42 @@ impl WgpuPipeline {
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
 
+        // Create image textures (load from files or use black fallback)
+        let image_textures = std::array::from_fn(|i| {
+            if let Some(path) = image_paths.get(i) {
+                match image::open(path.as_ref()) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        info!("Loaded image {} from {:?} ({}x{})", i, path.as_ref(), w, h);
+                        let texture = device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some(&format!("Image Texture {}", i)),
+                            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                            &rgba,
+                            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                        );
+                        texture
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load image {:?}: {}. Using black texture.", path.as_ref(), e);
+                        Self::create_black_texture(&device, &queue, i)
+                    }
+                }
+            } else {
+                Self::create_black_texture(&device, &queue, i)
+            }
+        });
+
         Ok(Self {
             device,
             queue,
@@ -314,6 +394,7 @@ impl WgpuPipeline {
             output_height: height,
             segmentation_engine,
             mask_texture,
+            image_textures,
             input_texture: None,
             output_textures: Vec::new(),
             readback_buffer: None,
@@ -389,6 +470,9 @@ impl WgpuPipeline {
         // 4. Bind Groups
         self.bind_groups.clear();
         let mask_view = self.mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let image_views: [wgpu::TextureView; 4] = std::array::from_fn(|i| {
+            self.image_textures[i].create_view(&wgpu::TextureViewDescriptor::default())
+        });
         
         for i in 0..self.render_pipelines.len() {
             let input_view = if i == 0 {
@@ -405,6 +489,10 @@ impl WgpuPipeline {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mask_view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&image_views[0]) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&image_views[1]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&image_views[2]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&image_views[3]) },
                 ],
             });
             self.bind_groups.push(bind_group);
@@ -415,6 +503,27 @@ impl WgpuPipeline {
         self.cached_mask_width = mask_w;
         self.cached_mask_height = mask_h;
         Ok(())
+    }
+
+    /// Creates a 1x1 black RGBA texture as fallback for missing image inputs.
+    fn create_black_texture(device: &wgpu::Device, queue: &wgpu::Queue, index: usize) -> wgpu::Texture {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("Black Texture {}", index)),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &[0u8, 0u8, 0u8, 255u8], // Black RGBA
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        texture
     }
 
     /// Converts GLSL fragment shader to WGSL.
