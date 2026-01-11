@@ -82,7 +82,8 @@ pub struct WgpuPipeline {
 
 impl WgpuPipeline {
     /// Creates a new wgpu pipeline with the given shaders.
-    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>, segmentation: bool) -> Result<Self> {
+    /// Segmentation is automatically enabled if any shader uses the mask binding (binding 3).
+    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -105,20 +106,34 @@ impl WgpuPipeline {
             },
         ))?;
 
-        // Prepare shader sources
+        // Prepare shader sources and detect if any shader uses the mask binding
+        let mut needs_segmentation = false;
         let shader_sources = if shaders.is_empty() {
             vec![(DEFAULT_FRAGMENT_SHADER.to_string(), "fs_main")]
         } else {
             let mut sources = Vec::new();
             for shader in shaders {
-                let (fragment_wgsl, fragment_entry_point) = match shader {
-                    ShaderSource::Glsl(glsl) => (Self::glsl_to_wgsl(&glsl)?, "main"),
-                    ShaderSource::Wgsl(wgsl) => (wgsl, "fs_main"),
+                let (fragment_wgsl, fragment_entry_point, uses_mask) = match shader {
+                    ShaderSource::Glsl(glsl) => {
+                        let (wgsl, uses_mask) = Self::glsl_to_wgsl(&glsl)?;
+                        (wgsl, "main", uses_mask)
+                    }
+                    ShaderSource::Wgsl(wgsl) => {
+                        let uses_mask = Self::wgsl_uses_mask(&wgsl);
+                        (wgsl, "fs_main", uses_mask)
+                    }
                 };
+                if uses_mask {
+                    needs_segmentation = true;
+                }
                 sources.push((fragment_wgsl, fragment_entry_point));
             }
             sources
         };
+        
+        if needs_segmentation {
+            info!("Auto-enabling segmentation: shader uses t_mask binding");
+        }
 
         // Create shader modules
         let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -249,7 +264,7 @@ impl WgpuPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let segmentation_engine = if segmentation {
+        let segmentation_engine = if needs_segmentation {
              crate::ml::AsyncSegmentationEngine::new()?
         } else {
             None
@@ -403,14 +418,32 @@ impl WgpuPipeline {
     }
 
     /// Converts GLSL fragment shader to WGSL.
-    fn glsl_to_wgsl(glsl: &str) -> Result<String> {
+    /// Returns (wgsl_source, uses_mask_binding) where uses_mask_binding is true if the shader
+    /// references binding 3 (t_mask texture for segmentation).
+    fn glsl_to_wgsl(glsl: &str) -> Result<(String, bool)> {
         let mut frontend = Frontend::default();
         let options = Options::from(ShaderStage::Fragment);
         let module = frontend.parse(&options, glsl).map_err(|e| anyhow!("GLSL parse error: {:?}", e))?;
+        
+        // Check if shader uses binding 3 (t_mask) via naga reflection
+        let uses_mask = module.global_variables.iter().any(|(_, var)| {
+            matches!(var.binding, Some(naga::ResourceBinding { group: 0, binding: 3 }))
+        });
+        
         let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
         let info = validator.validate(&module).map_err(|e| anyhow!("Shader validation error: {:?}", e))?;
         let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty()).map_err(|e| anyhow!("WGSL generation error: {:?}", e))?;
-        Ok(wgsl)
+        Ok((wgsl, uses_mask))
+    }
+
+    /// Check if a WGSL shader uses binding 3 (t_mask for segmentation).
+    fn wgsl_uses_mask(wgsl: &str) -> bool {
+        match naga::front::wgsl::parse_str(wgsl) {
+            Ok(module) => module.global_variables.iter().any(|(_, var)| {
+                matches!(var.binding, Some(naga::ResourceBinding { group: 0, binding: 3 }))
+            }),
+            Err(_) => false, // If parsing fails, assume no mask usage (error will surface later)
+        }
     }
 
     pub fn device_and_queue(&self) -> (&wgpu::Device, &wgpu::Queue) { (&self.device, &self.queue) }

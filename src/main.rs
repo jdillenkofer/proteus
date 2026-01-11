@@ -62,10 +62,6 @@ struct Args {
     /// Output mode: window or virtual-camera
     #[arg(long, value_enum, default_value = "window")]
     output: OutputMode,
-
-    /// Enable AI-based person segmentation (requires models/mediapipe_selfie.onnx)
-    #[arg(long)]
-    segmentation: bool,
 }
 
 /// Application state for the event loop.
@@ -128,7 +124,7 @@ impl ProteusApp {
         }
 
         // Initialize shader pipeline
-        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders, self.args.segmentation)?);
+        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders)?);
         info!("Shader pipeline initialized");
 
         Ok(())
@@ -347,7 +343,7 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
     }
 
     // Initialize shader pipeline
-    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders, args.segmentation)?;
+    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders)?;
     info!("Shader pipeline initialized");
 
     // Initialize virtual camera output

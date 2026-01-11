@@ -72,9 +72,10 @@ proteus/
 
 #### Usage
 
-Run with the `--segmentation` flag:
+Segmentation is **automatically enabled** when using shaders that reference the mask texture (`t_mask`). Simply use a segmentation shader:
+
 ```bash
-cargo run --release -- --segmentation --shader shaders/background_blur.frag
+cargo run --release -- --shader shaders/background_blur.frag
 ```
 
 ### Chaining Shaders
