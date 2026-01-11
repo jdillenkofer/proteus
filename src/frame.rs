@@ -206,6 +206,59 @@ impl VideoFrame {
             data: nv12_data,
         }
     }
+
+    /// Converts this frame to YUYV format (YUV 4:2:2 packed).
+    /// YUYV is Y0 U0 Y1 V0 (2 pixels packed in 4 bytes).
+    pub fn to_yuyv(&self) -> VideoFrame {
+        let rgba = self.to_rgba();
+        let pixel_count = (self.width as usize) * (self.height as usize);
+        let mut yuyv_data = vec![0u8; pixel_count * 2];
+
+        for i in 0..(pixel_count / 2) {
+            // Read 2 pixels (RGBA)
+            let idx1 = i * 2 * 4;
+            let idx2 = (i * 2 + 1) * 4;
+
+            let r1 = rgba.data[idx1] as f32;
+            let g1 = rgba.data[idx1 + 1] as f32;
+            let b1 = rgba.data[idx1 + 2] as f32;
+
+            let r2 = rgba.data[idx2] as f32;
+            let g2 = rgba.data[idx2 + 1] as f32;
+            let b2 = rgba.data[idx2 + 2] as f32;
+
+            // Convert to YUV
+            // Y = 0.299R + 0.587G + 0.114B
+            // U = -0.169R - 0.331G + 0.500B + 128
+            // V = 0.500R - 0.419G - 0.081B + 128
+
+            let y1 = (0.299 * r1 + 0.587 * g1 + 0.114 * b1).clamp(0.0, 255.0);
+            let y2 = (0.299 * r2 + 0.587 * g2 + 0.114 * b2).clamp(0.0, 255.0);
+
+            // Average U and V for the two pixels
+            let u1 = -0.169 * r1 - 0.331 * g1 + 0.500 * b1 + 128.0;
+            let v1 = 0.500 * r1 - 0.419 * g1 - 0.081 * b1 + 128.0;
+            let u2 = -0.169 * r2 - 0.331 * g2 + 0.500 * b2 + 128.0;
+            let v2 = 0.500 * r2 - 0.419 * g2 - 0.081 * b2 + 128.0;
+
+            let u = ((u1 + u2) / 2.0).clamp(0.0, 255.0);
+            let v = ((v1 + v2) / 2.0).clamp(0.0, 255.0);
+
+            let out_idx = i * 4;
+            yuyv_data[out_idx] = y1 as u8;
+            yuyv_data[out_idx + 1] = u as u8;
+            yuyv_data[out_idx + 2] = y2 as u8;
+            yuyv_data[out_idx + 3] = v as u8;
+        }
+
+        VideoFrame {
+            width: self.width,
+            height: self.height,
+            format: PixelFormat::Yuyv,
+            timestamp_us: self.timestamp_us,
+            data: yuyv_data,
+        }
+    }
 }
 
 /// Vertex for rendering a full-screen quad.
