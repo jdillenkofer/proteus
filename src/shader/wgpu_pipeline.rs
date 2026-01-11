@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::path::Path;
 use tracing::info;
 use wgpu::util::DeviceExt;
+use image::GenericImageView;
 
 /// Source for a texture slot - either a static image or a video.
 pub enum TextureSlot {
@@ -626,7 +627,12 @@ impl ShaderPipeline for WgpuPipeline {
         self.ensure_resources(rgba_input.width, rgba_input.height, final_mask_w, final_mask_h)?;
         
         // 3. Update uniform buffer
-        let uniforms = Uniforms { time, width: self.output_width as f32, height: self.output_height as f32, seed: rand::random::<f32>() };
+        let uniforms = Uniforms { 
+            time, 
+            width: self.output_width as f32, 
+            height: self.output_height as f32, 
+            seed: rand::random::<f32>(),
+        };
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
         // 4. Upload Mask
@@ -658,6 +664,7 @@ impl ShaderPipeline for WgpuPipeline {
 
         for (slot_index, player_index) in self.video_slot_map.iter().enumerate() {
             if let Some(player_idx) = player_index {
+                // If the player has a new frame for the current time
                 if let Some(frame) = self.video_players[*player_idx].get_frame(time) {
                     let current_texture = &self.image_textures[slot_index];
                     
@@ -702,22 +709,8 @@ impl ShaderPipeline for WgpuPipeline {
 
         // Recreate bind groups if any texture was resized
         if bind_groups_need_update {
-            // Need to recreate all bind groups because they reference image_textures
-            // This is slightly inefficient but happens only once per video start usually
-            self.ensure_resources(self.cached_width, self.cached_height, self.cached_mask_width, self.cached_mask_height)?;
-             
-             // ensure_resources won't recreate if dimensions match, so we need to FORCE it.
-             // But ensure_resources checks `if width != self.cached_width ...`
-             // We need to bypass that or force it.
-             // Let's modify ensure_resources to accept a 'force' flag or handle it here.
-             // Actually, I can just destroy current bind groups? No.
-             // I'll manually call the bind group creation logic here or modify ensure_resources.
-             // Let's manually trigger by clearing cached dimensions? 
-             // self.cached_width = 0; // Force update
-             // self.ensure_resources(...)
-             // Yes, invalidating cache is simplest.
-             self.cached_width = 0; 
-             self.ensure_resources(rgba_input.width, rgba_input.height, final_mask_w, final_mask_h)?;
+            self.cached_width = 0; // Force update
+            self.ensure_resources(rgba_input.width, rgba_input.height, final_mask_w, final_mask_h)?;
         }
 
         let upload_start = std::time::Instant::now();
@@ -785,4 +778,6 @@ impl ShaderPipeline for WgpuPipeline {
 
         Ok(VideoFrame::from_data(self.output_width, self.output_height, PixelFormat::Rgba, output_data))
     }
+
+
 }
