@@ -1,7 +1,7 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use proteus::capture::{AsyncCapture, CaptureBackend, CaptureConfig, NokhwaCapture};
 use proteus::output::window_output::WindowRenderer;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -76,6 +76,7 @@ struct Args {
 /// Application state for the event loop.
 struct ProteusApp {
     args: Args,
+    ordered_inputs: Vec<(TextureInputType, PathBuf)>,
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
     capture: Option<AsyncCapture>,
@@ -88,10 +89,11 @@ struct ProteusApp {
 }
 
 impl ProteusApp {
-    fn new(args: Args) -> Self {
+    fn new(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Self {
         let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
         Self {
             args,
+            ordered_inputs,
             window: None,
             renderer: None,
             capture: None,
@@ -133,21 +135,25 @@ impl ProteusApp {
         }
 
         // Initialize shader pipeline
-        // Build texture sources: videos first, then images (up to 4 total)
+        // Build texture sources from ordered inputs (up to 4 total)
         let mut texture_sources: Vec<TextureSlot> = Vec::new();
-        for path in &self.args.video {
+        
+        for (input_type, path) in &self.ordered_inputs {
             if texture_sources.len() >= 4 { break; }
-            match VideoPlayer::new(path) {
-                Ok(player) => texture_sources.push(TextureSlot::Video(player)),
-                Err(e) => {
-                    error!("Failed to open video {:?}: {}", path, e);
-                    texture_sources.push(TextureSlot::Empty);
+            match input_type {
+                TextureInputType::Video => {
+                    match VideoPlayer::new(path) {
+                        Ok(player) => texture_sources.push(TextureSlot::Video(player)),
+                        Err(e) => {
+                            error!("Failed to open video {:?}: {}", path, e);
+                            texture_sources.push(TextureSlot::Empty);
+                        }
+                    }
+                },
+                TextureInputType::Image => {
+                    texture_sources.push(TextureSlot::Image(path.clone()));
                 }
             }
-        }
-        for path in &self.args.image {
-            if texture_sources.len() >= 4 { break; }
-            texture_sources.push(TextureSlot::Image(path.clone()));
         }
         
         self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders, texture_sources)?);
@@ -321,13 +327,54 @@ fn main() -> Result<()> {
 
 /// Run in window output mode (default).
 fn run_window_mode(args: Args) -> Result<()> {
+    // Build ordered list of texture inputs
+    let mut ordered_inputs: Vec<(usize, TextureInputType, PathBuf)> = Vec::new();
+
+    // We need to match indices to values to preserve CLI order
+    let matches = Args::command().get_matches();
+
+    if let Some(indices) = matches.indices_of("video") {
+        // Warning: We must reconstruct the values because we can't easily zip matches.get_many() with indices_of()
+        // comfortably while using the typed Args struct.
+        // Actually, we can use the typed args for values since clap preserves order.
+        // But we need to use the matches to get indices.
+
+        let paths: Vec<&PathBuf> = args.video.iter().collect();
+        for (i, idx) in indices.enumerate() {
+            if i < paths.len() {
+                ordered_inputs.push((idx, TextureInputType::Video, paths[i].clone()));
+            }
+        }
+    }
+
+    if let Some(indices) = matches.indices_of("image") {
+        let paths: Vec<&PathBuf> = args.image.iter().collect();
+        for (i, idx) in indices.enumerate() {
+            if i < paths.len() {
+                ordered_inputs.push((idx, TextureInputType::Image, paths[i].clone()));
+            }
+        }
+    }
+
+    ordered_inputs.sort_by_key(|k| k.0);
+
+    let mut app = ProteusApp::new(args, ordered_inputs.into_iter().map(|(_, t, p)| (t, p)).collect());
+    app.initialize()?;
+
+    // Create event loop
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = ProteusApp::new(args);
+    // Run app
     event_loop.run_app(&mut app)?;
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+enum TextureInputType {
+    Video,
+    Image,
 }
 
 /// Run in virtual camera output mode.
@@ -370,20 +417,51 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
 
     // Initialize shader pipeline
     // Build texture sources: videos first, then images (up to 4 total)
+    // Initialize shader pipeline
+    // Build texture sources from ordered inputs (up to 4 total)
     let mut texture_sources: Vec<TextureSlot> = Vec::new();
-    for path in &args.video {
-        if texture_sources.len() >= 4 { break; }
-        match VideoPlayer::new(path) {
-            Ok(player) => texture_sources.push(TextureSlot::Video(player)),
-            Err(e) => {
-                tracing::error!("Failed to open video {:?}: {}", path, e);
-                texture_sources.push(TextureSlot::Empty);
+
+    // We need to match indices to values to preserve CLI order
+    let matches = Args::command().get_matches();
+    let mut ordered_inputs: Vec<(usize, TextureInputType, PathBuf)> = Vec::new();
+
+    if let Some(indices) = matches.indices_of("video") {
+        let paths: Vec<&PathBuf> = args.video.iter().collect();
+        for (i, idx) in indices.enumerate() {
+            if i < paths.len() {
+                ordered_inputs.push((idx, TextureInputType::Video, paths[i].clone()));
             }
         }
     }
-    for path in &args.image {
+
+    if let Some(indices) = matches.indices_of("image") {
+        let paths: Vec<&PathBuf> = args.image.iter().collect();
+        for (i, idx) in indices.enumerate() {
+            if i < paths.len() {
+                ordered_inputs.push((idx, TextureInputType::Image, paths[i].clone()));
+            }
+        }
+    }
+    
+    ordered_inputs.sort_by_key(|k| k.0);
+
+    for idx in 0..ordered_inputs.len() {
         if texture_sources.len() >= 4 { break; }
-        texture_sources.push(TextureSlot::Image(path.clone()));
+        let (_, input_type, path) = &ordered_inputs[idx];
+        match input_type {
+            TextureInputType::Video => {
+                match VideoPlayer::new(path) {
+                    Ok(player) => texture_sources.push(TextureSlot::Video(player)),
+                    Err(e) => {
+                        error!("Failed to open video {:?}: {}", path, e);
+                        texture_sources.push(TextureSlot::Empty);
+                    }
+                }
+            },
+            TextureInputType::Image => {
+                texture_sources.push(TextureSlot::Image(path.clone()));
+            }
+        }
     }
     
     let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders, texture_sources)?;
