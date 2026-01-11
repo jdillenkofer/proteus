@@ -12,6 +12,7 @@ layout(set=0, binding=3) uniform texture2D t_mask;
 
 layout(location=0) in vec2 v_tex_coords;
 layout(location=0) out vec4 f_color;
+layout(location=1) out float f_mask_out;
 
 // Simplex noise function
 vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
@@ -43,10 +44,7 @@ float snoise(vec2 v){
 }
 
 void main() {
-    float mask = texture(sampler2D(t_mask, s_sampler), v_tex_coords).r;
-
-    // Background color (original)
-    vec4 bg_color = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
+    float original_mask = texture(sampler2D(t_mask, s_sampler), v_tex_coords).r;
 
     // Distortion amount
     float distortion_strength = 0.05; // 5% UV shift
@@ -71,20 +69,23 @@ void main() {
     // Make the distortion color slightly brighter (electric feel)
     distorted_color += 0.1;
 
-    // Final mix:
-    // If mask is 1 (person), show distorted "invisibility" effect
-    // If mask is 0 (background), show normal background
-    
+    // Warped mask for wobbly edges
+    float warped_mask = texture(sampler2D(t_mask, s_sampler), distorted_uv).r;
+
+    // Background color (original)
+    vec4 bg_color = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
+
     // Rim light calculation for the "edge" of the invisibility
-    // Use gradient of mask to find edges
+    // Use gradient of mask to find edges (using distorted UVs for consistency)
     float d = 1.0 / width; // roughly 1 px
-    float m_right = texture(sampler2D(t_mask, s_sampler), v_tex_coords + vec2(d, 0.0)).r;
-    float m_up = texture(sampler2D(t_mask, s_sampler), v_tex_coords + vec2(0.0, d)).r;
-    float edge = length(vec2(mask - m_right, mask - m_up));
+    float m_right = texture(sampler2D(t_mask, s_sampler), distorted_uv + vec2(d, 0.0)).r;
+    float m_up = texture(sampler2D(t_mask, s_sampler), distorted_uv + vec2(0.0, d)).r;
+    float edge = length(vec2(warped_mask - m_right, warped_mask - m_up));
     
     // Add rim light
     distorted_color += vec4(0.2, 0.5, 1.0, 0.0) * edge * 2.0;
 
-    mask = smoothstep(0.4, 0.6, mask);
-    f_color = mix(bg_color, distorted_color, mask);
+    float final_mask = smoothstep(0.4, 0.6, warped_mask);
+    f_color = mix(bg_color, distorted_color, final_mask);
+    f_mask_out = final_mask;
 }

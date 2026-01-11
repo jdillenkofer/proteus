@@ -93,6 +93,10 @@ You can chain multiple shaders together by specifying the `-s` flag multiple tim
 cargo run --release -- -s shaders/plasma.frag -s shaders/ripple.frag
 ```
 
+#### Mask Propagation
+
+Displacement effects effectively "warp" the segmentation mask along with the image. This ensures that subsequent effects (like background blur) applied after a displacement shader will use the correctly distorted mask, preventing visual artifacts where the blur doesn't match the displaced subject.
+
 ### Virtual Camera (Linux/Windows)
 
 1. Ensure OBS Studio is installed.

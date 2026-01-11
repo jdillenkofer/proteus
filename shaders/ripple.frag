@@ -2,9 +2,11 @@
 
 layout(location = 0) in vec2 tex_coords;
 layout(location = 0) out vec4 frag_color;
+layout(location = 1) out float f_mask_out;
 
 layout(set = 0, binding = 0) uniform texture2D t_texture;
 layout(set = 0, binding = 1) uniform sampler s_sampler;
+layout(set = 0, binding = 3) uniform texture2D t_mask;
 
 layout(set = 0, binding = 2) uniform Uniforms {
     float time;
@@ -60,4 +62,5 @@ void main() {
     // tex_color.rgb += highlight * 0.1;
 
     frag_color = tex_color;
+    f_mask_out = texture(sampler2D(t_mask, s_sampler), final_uv).r;
 }

@@ -12,6 +12,7 @@ layout(set=0, binding=3) uniform texture2D t_mask;
 
 layout(location=0) in vec2 v_tex_coords;
 layout(location=0) out vec4 f_color;
+layout(location=1) out float f_mask_out;
 
 float rand(vec2 co) {
     return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
@@ -89,4 +90,5 @@ void main() {
     color *= smoothstep(0.8, 0.3, d_vig);
 
     f_color = vec4(color, 1.0);
+    f_mask_out = texture(sampler2D(t_mask, s_sampler), uv).r;
 }

@@ -101,6 +101,8 @@ pub struct WgpuPipeline {
     frame_count: u64,
     
     // Shader hot-reloading
+    pipeline_mask_outputs: Vec<bool>,
+    mask_targets: Vec<Option<wgpu::Texture>>,
     watcher: Option<RecommendedWatcher>,
     reload_rx: Option<Receiver<std::result::Result<Event, notify::Error>>>,
     shader_sources: Vec<ShaderSource>, // Keep sources to re-compile
@@ -140,26 +142,29 @@ impl WgpuPipeline {
             },
         ))?;
 
-        // Prepare shader sources and detect if any shader uses the mask binding
+        // Prepare shader sources and detect if any shader uses the mask binding or outputs a mask
         let mut needs_segmentation = false;
+        let mut pipeline_mask_outputs = Vec::new();
+
         let shader_sources = if shaders.is_empty() {
             vec![(DEFAULT_FRAGMENT_SHADER.to_string(), "fs_main")]
         } else {
             let mut sources = Vec::new();
             for shader in &shaders {
-                let (fragment_wgsl, fragment_entry_point, uses_mask) = match shader {
+                let (fragment_wgsl, fragment_entry_point, uses_mask, outputs_mask) = match shader {
                     ShaderSource::Glsl { code: glsl, .. } => {
-                        let (wgsl, uses_mask) = Self::glsl_to_wgsl(&glsl)?;
-                        (wgsl, "main", uses_mask)
+                        let (wgsl, uses_mask, outputs_mask) = Self::glsl_to_wgsl(&glsl)?;
+                        (wgsl, "main", uses_mask, outputs_mask)
                     }
                     ShaderSource::Wgsl { code: wgsl, .. } => {
-                        let uses_mask = Self::wgsl_uses_mask(&wgsl);
-                        (wgsl.clone(), "fs_main", uses_mask)
+                        let (uses_mask, outputs_mask) = Self::inspect_wgsl(&wgsl);
+                        (wgsl.clone(), "fs_main", uses_mask, outputs_mask)
                     }
                 };
                 if uses_mask {
                     needs_segmentation = true;
                 }
+                pipeline_mask_outputs.push(outputs_mask);
                 sources.push((fragment_wgsl, fragment_entry_point));
             }
             sources
@@ -269,8 +274,23 @@ impl WgpuPipeline {
         for (i, (fragment_wgsl, fragment_entry_point)) in shader_sources.into_iter().enumerate() {
             let fragment_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(&format!("Fragment Shader {}", i)),
-                source: wgpu::ShaderSource::Wgsl(Cow::Owned(fragment_wgsl)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(fragment_wgsl.to_string())),
             });
+
+            let mut targets = vec![Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
+
+            // If shader outputs a mask (Location 1), add a second target
+            if i < pipeline_mask_outputs.len() && pipeline_mask_outputs[i] {
+                targets.push(Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }));
+            }
 
             let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(&format!("Render Pipeline {}", i)),
@@ -284,11 +304,7 @@ impl WgpuPipeline {
                 fragment: Some(wgpu::FragmentState {
                     module: &fragment_module,
                     entry_point: Some(fragment_entry_point),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &targets,
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
@@ -485,6 +501,8 @@ impl WgpuPipeline {
             shader_sources: shaders,
             vertex_shader_module: vertex_module,
             pipeline_layout,
+            pipeline_mask_outputs,
+            mask_targets: Vec::new(),
         })
     }
 
@@ -536,23 +554,41 @@ impl WgpuPipeline {
                 }
                 
                 // Compile
-                let (fragment_wgsl, fragment_entry_point) = match source {
+                // Compile and detect capabilities
+                let (fragment_wgsl, fragment_entry_point, outputs_mask) = match source {
                      ShaderSource::Glsl { code: glsl, .. } => {
                          match Self::glsl_to_wgsl(glsl) {
-                             Ok((wgsl, _)) => (wgsl, "main"),
+                             Ok((wgsl, _, outputs_mask)) => (wgsl, "main", outputs_mask),
                              Err(e) => {
                                  tracing::error!("GLSL compilation error in {:?}: {}", path, e);
                                  continue;
                              }
                          }
                      }
-                     ShaderSource::Wgsl { code: wgsl, .. } => (wgsl.clone(), "fs_main"),
+                     ShaderSource::Wgsl { code: wgsl, .. } => {
+                         let (_, outputs_mask) = Self::inspect_wgsl(wgsl);
+                         (wgsl.clone(), "fs_main", outputs_mask)
+                     }
                 };
 
                 let fragment_module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(&format!("Fragment Shader {}", i)),
                     source: wgpu::ShaderSource::Wgsl(Cow::Owned(fragment_wgsl)),
                 });
+
+                let mut targets = vec![Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })];
+
+                if outputs_mask {
+                    targets.push(Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }));
+                }
 
                 let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(&format!("Render Pipeline {}", i)),
@@ -566,11 +602,7 @@ impl WgpuPipeline {
                     fragment: Some(wgpu::FragmentState {
                         module: &fragment_module,
                         entry_point: Some(fragment_entry_point),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
+                        targets: &targets,
                         compilation_options: Default::default(),
                     }),
                     primitive: wgpu::PrimitiveState {
@@ -591,9 +623,14 @@ impl WgpuPipeline {
                 // Replace pipeline
                 if i < self.render_pipelines.len() {
                     self.render_pipelines[i] = render_pipeline;
+                    if i < self.pipeline_mask_outputs.len() {
+                        self.pipeline_mask_outputs[i] = outputs_mask;
+                    }
                     info!("Successfully reloaded shader {}", i);
                 }
             }
+            // Force resource update to align bind groups and output textures
+            self.cached_width = 0;
         }
     }
 
@@ -657,13 +694,42 @@ impl WgpuPipeline {
             mapped_at_creation: false,
         }));
 
+        // 3. Mask Targets (For shaders that output mask)
+        
+        // Re-do mask targets logic: strict one-to-one mapping
+        self.mask_targets = (0..self.render_pipelines.len()).map(|i| {
+             if self.pipeline_mask_outputs.get(i).copied().unwrap_or(false) {
+                 Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("Intermediate Mask Texture {}", i)),
+                    size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                }))
+             } else {
+                 None
+             }
+        }).collect();
+
+
         // 4. Bind Groups
         self.bind_groups.clear();
-        let mask_view = self.mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let initial_mask_view = self.mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        let mask_target_views: Vec<Option<wgpu::TextureView>> = self.mask_targets.iter().map(|t| {
+             t.as_ref().map(|tex| tex.create_view(&wgpu::TextureViewDescriptor::default()))
+        }).collect();
+        
         let image_views: [wgpu::TextureView; 4] = std::array::from_fn(|i| {
             self.image_textures[i].create_view(&wgpu::TextureViewDescriptor::default())
         });
         
+        // Track which mask to bind. Start with the ML mask.
+        let mut current_mask_view = &initial_mask_view;
+
         for i in 0..self.render_pipelines.len() {
             let input_view = if i == 0 {
                 self.input_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())
@@ -678,7 +744,7 @@ impl WgpuPipeline {
                     wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mask_view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(current_mask_view) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&image_views[0]) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&image_views[1]) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&image_views[2]) },
@@ -686,6 +752,11 @@ impl WgpuPipeline {
                 ],
             });
             self.bind_groups.push(bind_group);
+            
+            // If this pipeline outputs a mask, the next one will use it.
+            if let Some(view) = &mask_target_views[i] {
+                current_mask_view = view;
+            }
         }
 
         self.cached_width = width;
@@ -716,10 +787,35 @@ impl WgpuPipeline {
         texture
     }
 
+    /// Inspect WGSL and return (uses_mask_binding, outputs_mask_location_1).
+    fn inspect_wgsl(wgsl: &str) -> (bool, bool) {
+        match naga::front::wgsl::parse_str(wgsl) {
+            Ok(module) => {
+                let uses_mask = module.global_variables.iter().any(|(_, var)| {
+                    matches!(var.binding, Some(naga::ResourceBinding { group: 0, binding: 3 }))
+                });
+                
+                // Check if fragment output has Location(1)
+                let mut outputs_mask = false;
+                if let Some(entry_point) = module.entry_points.iter().find(|e| e.stage == ShaderStage::Fragment) {
+                     if let Some(result) = &entry_point.function.result {
+                         if let naga::TypeInner::Struct { members, .. } = &module.types[result.ty].inner {
+                             if members.iter().any(|m| matches!(m.binding, Some(naga::Binding::Location { location: 1, .. }))) {
+                                 outputs_mask = true;
+                             }
+                         }
+                     }
+                }
+                
+                (uses_mask, outputs_mask)
+            }
+            Err(_) => (false, false), 
+        }
+    }
+
     /// Converts GLSL fragment shader to WGSL.
-    /// Returns (wgsl_source, uses_mask_binding) where uses_mask_binding is true if the shader
-    /// references binding 3 (t_mask texture for segmentation).
-    fn glsl_to_wgsl(glsl: &str) -> Result<(String, bool)> {
+    /// Returns (wgsl_source, uses_mask_binding, outputs_mask_location_1)
+    fn glsl_to_wgsl(glsl: &str) -> Result<(String, bool, bool)> {
         let mut frontend = Frontend::default();
         let options = Options::from(ShaderStage::Fragment);
         let module = frontend.parse(&options, glsl).map_err(|e| anyhow!("GLSL parse error: {:?}", e))?;
@@ -729,20 +825,22 @@ impl WgpuPipeline {
             matches!(var.binding, Some(naga::ResourceBinding { group: 0, binding: 3 }))
         });
         
+         // Check if fragment output has Location(1)
+        let mut outputs_mask = false;
+        if let Some(entry_point) = module.entry_points.iter().find(|e| e.stage == ShaderStage::Fragment) {
+             if let Some(result) = &entry_point.function.result {
+                 if let naga::TypeInner::Struct { members, .. } = &module.types[result.ty].inner {
+                     if members.iter().any(|m| matches!(m.binding, Some(naga::Binding::Location { location: 1, .. }))) {
+                         outputs_mask = true;
+                     }
+                 }
+             }
+        }
+        
         let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
         let info = validator.validate(&module).map_err(|e| anyhow!("Shader validation error: {:?}", e))?;
         let wgsl = naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty()).map_err(|e| anyhow!("WGSL generation error: {:?}", e))?;
-        Ok((wgsl, uses_mask))
-    }
-
-    /// Check if a WGSL shader uses binding 3 (t_mask for segmentation).
-    fn wgsl_uses_mask(wgsl: &str) -> bool {
-        match naga::front::wgsl::parse_str(wgsl) {
-            Ok(module) => module.global_variables.iter().any(|(_, var)| {
-                matches!(var.binding, Some(naga::ResourceBinding { group: 0, binding: 3 }))
-            }),
-            Err(_) => false, // If parsing fails, assume no mask usage (error will surface later)
-        }
+        Ok((wgsl, uses_mask, outputs_mask))
     }
 
     pub fn device_and_queue(&self) -> (&wgpu::Device, &wgpu::Queue) { (&self.device, &self.queue) }
@@ -882,16 +980,32 @@ impl ShaderPipeline for WgpuPipeline {
 
         for (i, pipeline) in self.render_pipelines.iter().enumerate() {
             let output_view = self.output_textures[i].create_view(&wgpu::TextureViewDescriptor::default());
+            let mut color_attachments = vec![Some(wgpu::RenderPassColorAttachment {
+                view: &output_view,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                depth_slice: None,
+            })];
+
+            // If this pipeline outputs a mask, add the second attachment
+            // We need to keep a reference to the view alive, so let's create it properly
+            let mask_view: Option<wgpu::TextureView>;
+            if let Some(mask_texture) = self.mask_targets.get(i).and_then(|t| t.as_ref()) {
+                mask_view = Some(mask_texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                    view: mask_view.as_ref().unwrap(),
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                }));
+            } else {
+                 mask_view = None;
+            }
 
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some(&format!("Render Pass {}", i)),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &output_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                        depth_slice: None,
-                    })],
+                    color_attachments: &color_attachments,
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
