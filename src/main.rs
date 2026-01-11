@@ -6,7 +6,8 @@ use proteus::capture::{AsyncCapture, CaptureBackend, CaptureConfig, NokhwaCaptur
 use proteus::output::window_output::WindowRenderer;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
-use proteus::shader::{ShaderPipeline, ShaderSource, WgpuPipeline};
+use proteus::shader::{ShaderPipeline, ShaderSource, TextureSlot, WgpuPipeline};
+use proteus::video::VideoPlayer;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,9 +64,13 @@ struct Args {
     #[arg(long, value_enum, default_value = "window")]
     output: OutputMode,
 
-    /// Path to image file(s) for shader use (up to 4, black if not provided)
+    /// Path to image file(s) for shader use (up to 4 total with videos, black if not provided)
     #[arg(long, num_args = 0..=4)]
     image: Vec<PathBuf>,
+
+    /// Path to video file(s) for shader use (up to 4 total with images)
+    #[arg(long, num_args = 0..=4)]
+    video: Vec<PathBuf>,
 }
 
 /// Application state for the event loop.
@@ -128,7 +133,24 @@ impl ProteusApp {
         }
 
         // Initialize shader pipeline
-        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders, self.args.image.clone())?);
+        // Build texture sources: videos first, then images (up to 4 total)
+        let mut texture_sources: Vec<TextureSlot> = Vec::new();
+        for path in &self.args.video {
+            if texture_sources.len() >= 4 { break; }
+            match VideoPlayer::new(path) {
+                Ok(player) => texture_sources.push(TextureSlot::Video(player)),
+                Err(e) => {
+                    error!("Failed to open video {:?}: {}", path, e);
+                    texture_sources.push(TextureSlot::Empty);
+                }
+            }
+        }
+        for path in &self.args.image {
+            if texture_sources.len() >= 4 { break; }
+            texture_sources.push(TextureSlot::Image(path.clone()));
+        }
+        
+        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders, texture_sources)?);
         info!("Shader pipeline initialized");
 
         Ok(())
@@ -347,7 +369,24 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
     }
 
     // Initialize shader pipeline
-    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders, args.image.clone())?;
+    // Build texture sources: videos first, then images (up to 4 total)
+    let mut texture_sources: Vec<TextureSlot> = Vec::new();
+    for path in &args.video {
+        if texture_sources.len() >= 4 { break; }
+        match VideoPlayer::new(path) {
+            Ok(player) => texture_sources.push(TextureSlot::Video(player)),
+            Err(e) => {
+                tracing::error!("Failed to open video {:?}: {}", path, e);
+                texture_sources.push(TextureSlot::Empty);
+            }
+        }
+    }
+    for path in &args.image {
+        if texture_sources.len() >= 4 { break; }
+        texture_sources.push(TextureSlot::Image(path.clone()));
+    }
+    
+    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders, texture_sources)?;
     info!("Shader pipeline initialized");
 
     // Initialize virtual camera output

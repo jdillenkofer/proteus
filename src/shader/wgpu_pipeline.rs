@@ -2,6 +2,7 @@
 
 use super::{ShaderPipeline, ShaderSource};
 use crate::frame::{PixelFormat, QuadVertex, VideoFrame};
+use crate::video::VideoPlayer;
 use anyhow::{anyhow, Result};
 use naga::front::glsl::{Frontend, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -10,6 +11,16 @@ use std::borrow::Cow;
 use std::path::Path;
 use tracing::info;
 use wgpu::util::DeviceExt;
+
+/// Source for a texture slot - either a static image or a video.
+pub enum TextureSlot {
+    /// Path to a static image file
+    Image(std::path::PathBuf),
+    /// Video player for dynamic frames
+    Video(VideoPlayer),
+    /// Empty slot (will use 1x1 black texture)
+    Empty,
+}
 
 /// Default vertex shader in WGSL.
 const VERTEX_SHADER: &str = r#"
@@ -69,6 +80,10 @@ pub struct WgpuPipeline {
     segmentation_engine: Option<crate::ml::AsyncSegmentationEngine>,
     mask_texture: wgpu::Texture,
     image_textures: [wgpu::Texture; 4],
+    /// Video players for dynamic texture slots
+    video_players: Vec<VideoPlayer>,
+    /// Which texture slots are videos (index into video_players)
+    video_slot_map: [Option<usize>; 4],
 
     // Performance Cache
     input_texture: Option<wgpu::Texture>,
@@ -85,8 +100,13 @@ pub struct WgpuPipeline {
 impl WgpuPipeline {
     /// Creates a new wgpu pipeline with the given shaders.
     /// Segmentation is automatically enabled if any shader uses the mask binding (binding 3).
-    /// Image paths (up to 4) are loaded as textures for bindings 4-7.
-    pub fn new(width: u32, height: u32, shaders: Vec<ShaderSource>, image_paths: Vec<impl AsRef<Path>>) -> Result<Self> {
+    /// Texture sources (up to 4) are used for bindings 4-7 in the order specified.
+    pub fn new(
+        width: u32,
+        height: u32,
+        shaders: Vec<ShaderSource>,
+        texture_sources: Vec<TextureSlot>,
+    ) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -345,40 +365,55 @@ impl WgpuPipeline {
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
 
-        // Create image textures (load from files or use black fallback)
-        let image_textures = std::array::from_fn(|i| {
-            if let Some(path) = image_paths.get(i) {
-                match image::open(path.as_ref()) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = rgba.dimensions();
-                        info!("Loaded image {} from {:?} ({}x{})", i, path.as_ref(), w, h);
-                        let texture = device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some(&format!("Image Texture {}", i)),
-                            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            view_formats: &[],
-                        });
-                        queue.write_texture(
-                            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                            &rgba,
-                            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-                            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                        );
-                        texture
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load image {:?}: {}. Using black texture.", path.as_ref(), e);
-                        Self::create_black_texture(&device, &queue, i)
+        // Process texture sources (videos, images, or empty)
+        let mut video_players: Vec<VideoPlayer> = Vec::new();
+        let mut video_slot_map: [Option<usize>; 4] = [None; 4];
+        let mut loaded_textures: Vec<Option<wgpu::Texture>> = vec![None; 4];
+        
+        for (i, source) in texture_sources.into_iter().enumerate() {
+            if i >= 4 { break; }
+            match source {
+                TextureSlot::Image(path) => {
+                    match image::open(&path) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = rgba.dimensions();
+                            info!("Loaded image {} from {:?} ({}x{})", i, path, w, h);
+                            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                                label: Some(&format!("Image Texture {}", i)),
+                                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                view_formats: &[],
+                            });
+                            queue.write_texture(
+                                wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                                &rgba,
+                                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                            );
+                            loaded_textures[i] = Some(texture);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load image {:?}: {}. Using black texture.", path, e);
+                        }
                     }
                 }
-            } else {
-                Self::create_black_texture(&device, &queue, i)
+                TextureSlot::Video(player) => {
+                    info!("Video slot {} ({}x{})", i, player.width, player.height);
+                    video_slot_map[i] = Some(video_players.len());
+                    video_players.push(player);
+                }
+                TextureSlot::Empty => {}
             }
+        }
+        
+        // Create textures for each slot (use loaded or black fallback)
+        let image_textures = std::array::from_fn(|i| {
+            loaded_textures[i].take().unwrap_or_else(|| Self::create_black_texture(&device, &queue, i))
         });
 
         Ok(Self {
@@ -395,6 +430,8 @@ impl WgpuPipeline {
             segmentation_engine,
             mask_texture,
             image_textures,
+            video_players,
+            video_slot_map,
             input_texture: None,
             output_textures: Vec::new(),
             readback_buffer: None,
@@ -614,6 +651,73 @@ impl ShaderPipeline for WgpuPipeline {
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_width as u32), rows_per_image: Some(h) },
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             );
+        }
+
+        // 5. Update video textures with current frames
+        let mut bind_groups_need_update = false;
+
+        for (slot_index, player_index) in self.video_slot_map.iter().enumerate() {
+            if let Some(player_idx) = player_index {
+                if let Some(frame) = self.video_players[*player_idx].get_frame(time) {
+                    let current_texture = &self.image_textures[slot_index];
+                    
+                    // Check if texture needs resizing
+                    if current_texture.width() != frame.width || current_texture.height() != frame.height {
+                        info!("Resizing video texture slot {} to {}x{}", slot_index, frame.width, frame.height);
+                        
+                        let new_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some(&format!("Video Texture {}", slot_index)),
+                            size: wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        
+                        self.image_textures[slot_index] = new_texture;
+                        bind_groups_need_update = true;
+                    }
+
+                    // Upload video frame to texture
+                    self.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { 
+                            texture: &self.image_textures[slot_index], 
+                            mip_level: 0, 
+                            origin: wgpu::Origin3d::ZERO, 
+                            aspect: wgpu::TextureAspect::All 
+                        },
+                        &frame.data,
+                        wgpu::TexelCopyBufferLayout { 
+                            offset: 0, 
+                            bytes_per_row: Some(frame.width * 4), 
+                            rows_per_image: Some(frame.height) 
+                        },
+                        wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
+                    );
+                }
+            }
+        }
+
+        // Recreate bind groups if any texture was resized
+        if bind_groups_need_update {
+            // Need to recreate all bind groups because they reference image_textures
+            // This is slightly inefficient but happens only once per video start usually
+            self.ensure_resources(self.cached_width, self.cached_height, self.cached_mask_width, self.cached_mask_height)?;
+             
+             // ensure_resources won't recreate if dimensions match, so we need to FORCE it.
+             // But ensure_resources checks `if width != self.cached_width ...`
+             // We need to bypass that or force it.
+             // Let's modify ensure_resources to accept a 'force' flag or handle it here.
+             // Actually, I can just destroy current bind groups? No.
+             // I'll manually call the bind group creation logic here or modify ensure_resources.
+             // Let's manually trigger by clearing cached dimensions? 
+             // self.cached_width = 0; // Force update
+             // self.ensure_resources(...)
+             // Yes, invalidating cache is simplest.
+             self.cached_width = 0; 
+             self.ensure_resources(rgba_input.width, rgba_input.height, final_mask_w, final_mask_h)?;
         }
 
         let upload_start = std::time::Instant::now();
