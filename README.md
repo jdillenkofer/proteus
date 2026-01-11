@@ -51,11 +51,11 @@ cargo run --release -- --shader shaders/crt.frag
 
 ### ML Segmentation
 
-To use the AI-powered segmentation features (background blur, replacement, etc.), you must first download the segmentation model.
+The **MediaPipe Selfie Segmentation** model is embedded directly in the binary at compile time.
 
-#### Downloading the Model
+#### Building from Source
 
-Download the pre-converted ONNX model from HuggingFace:
+Before compiling, download the ONNX model from HuggingFace:
 
 ```bash
 mkdir -p models
@@ -63,14 +63,14 @@ curl -L -o models/mediapipe_selfie.onnx \
   "https://huggingface.co/onnx-community/mediapipe_selfie_segmentation_landscape/resolve/main/onnx/model.onnx"
 ```
 
-This downloads the **MediaPipe Selfie Segmentation (Landscape)** model (144×256 input, optimized for 16:9 video).
-
 Your directory structure should look like:
 ```
 proteus/
 ├── models/
 │   └── mediapipe_selfie.onnx
 ```
+
+#### Usage
 
 Run with the `--segmentation` flag:
 ```bash

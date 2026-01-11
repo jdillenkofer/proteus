@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use image::{imageops::FilterType, GrayImage, ImageBuffer, Rgba, RgbImage, Rgb};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use tracing::{info, warn, debug};
@@ -13,6 +12,9 @@ use crate::frame::VideoFrame;
 // Note: Width x Height in image terms, model uses NCHW format [1, 3, 144, 256]
 const MODEL_WIDTH: u32 = 256;
 const MODEL_HEIGHT: u32 = 144;
+
+// Embed the ONNX model directly into the binary
+const SELFIE_MODEL_BYTES: &[u8] = include_bytes!("../../models/mediapipe_selfie.onnx");
 
 pub struct SegmentationEngine {
     session: Session,
@@ -28,16 +30,9 @@ impl SegmentationEngine {
         Ok(())
     }
 
-    /// Try to load the segmentation model.
-    /// Returns None if the model file is not found.
+    /// Load the embedded segmentation model.
     pub fn new() -> Result<Option<Self>> {
-        let model_path = Path::new("models/mediapipe_selfie.onnx");
-        if !model_path.exists() {
-            warn!("Segmentation model not found at {:?}. Background blur will blur EVERYTHING.", model_path);
-            return Ok(None);
-        }
-
-        info!("Loading segmentation model from {:?}", model_path);
+        info!("Loading embedded segmentation model");
         
         let mut session_builder = Session::builder()?;
         session_builder = session_builder.with_optimization_level(GraphOptimizationLevel::Level3)?;
@@ -90,7 +85,7 @@ impl SegmentationEngine {
             }
         }
     
-        let session = session_builder.commit_from_file(model_path)?;
+        let session = session_builder.commit_from_memory(SELFIE_MODEL_BYTES)?;
 
         Ok(Some(Self { session }))
     }
