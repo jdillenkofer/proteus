@@ -8,10 +8,11 @@ use naga::front::glsl::{Frontend, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use naga::ShaderStage;
 use std::borrow::Cow;
-use std::path::Path;
 use tracing::info;
 use wgpu::util::DeviceExt;
-use image::GenericImageView;
+
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
+use std::sync::mpsc::{channel, Receiver};
 
 /// Source for a texture slot - either a static image or a video.
 pub enum TextureSlot {
@@ -81,6 +82,8 @@ pub struct WgpuPipeline {
     segmentation_engine: Option<crate::ml::AsyncSegmentationEngine>,
     mask_texture: wgpu::Texture,
     image_textures: [wgpu::Texture; 4],
+    loaded_textures: [Option<wgpu::Texture>; 4], // Keep original loaded textures to avoid reloading images
+    current_video_texture_sizes: [Option<(u32, u32)>; 4],
     /// Video players for dynamic texture slots
     video_players: Vec<VideoPlayer>,
     /// Which texture slots are videos (index into video_players)
@@ -96,6 +99,13 @@ pub struct WgpuPipeline {
     cached_mask_width: u32,
     cached_mask_height: u32,
     frame_count: u64,
+    
+    // Shader hot-reloading
+    watcher: Option<RecommendedWatcher>,
+    reload_rx: Option<Receiver<std::result::Result<Event, notify::Error>>>,
+    shader_sources: Vec<ShaderSource>, // Keep sources to re-compile
+    vertex_shader_module: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
 }
 
 impl WgpuPipeline {
@@ -136,15 +146,15 @@ impl WgpuPipeline {
             vec![(DEFAULT_FRAGMENT_SHADER.to_string(), "fs_main")]
         } else {
             let mut sources = Vec::new();
-            for shader in shaders {
+            for shader in &shaders {
                 let (fragment_wgsl, fragment_entry_point, uses_mask) = match shader {
-                    ShaderSource::Glsl(glsl) => {
+                    ShaderSource::Glsl { code: glsl, .. } => {
                         let (wgsl, uses_mask) = Self::glsl_to_wgsl(&glsl)?;
                         (wgsl, "main", uses_mask)
                     }
-                    ShaderSource::Wgsl(wgsl) => {
+                    ShaderSource::Wgsl { code: wgsl, .. } => {
                         let uses_mask = Self::wgsl_uses_mask(&wgsl);
-                        (wgsl, "fs_main", uses_mask)
+                        (wgsl.clone(), "fs_main", uses_mask)
                     }
                 };
                 if uses_mask {
@@ -413,6 +423,32 @@ impl WgpuPipeline {
         }
         
         // Create textures for each slot (use loaded or black fallback)
+        
+        // Setup file watcher
+        let (watcher, reload_rx) = if !shaders.is_empty() {
+             let (tx, rx) = channel();
+             match RecommendedWatcher::new(tx, notify::Config::default()) {
+                 Ok(mut w) => {
+                     for source in &shaders {
+                         if let ShaderSource::Glsl { path: Some(p), .. } | ShaderSource::Wgsl { path: Some(p), .. } = source {
+                             if let Err(e) = w.watch(p, RecursiveMode::NonRecursive) {
+                                 tracing::warn!("Failed to watch shader file {:?}: {}", p, e);
+                             } else {
+                                 info!("Watching shader file {:?} for changes", p);
+                             }
+                         }
+                     }
+                     (Some(w), Some(rx))
+                 }
+                 Err(e) => {
+                     tracing::warn!("Failed to create file watcher: {}", e);
+                     (None, None)
+                 }
+             }
+        } else {
+            (None, None)
+        };
+
         let image_textures = std::array::from_fn(|i| {
             loaded_textures[i].take().unwrap_or_else(|| Self::create_black_texture(&device, &queue, i))
         });
@@ -431,6 +467,8 @@ impl WgpuPipeline {
             segmentation_engine,
             mask_texture,
             image_textures,
+            loaded_textures: [None, None, None, None], // Consumed above
+            current_video_texture_sizes: [None; 4],
             video_players,
             video_slot_map,
             input_texture: None,
@@ -442,7 +480,121 @@ impl WgpuPipeline {
             cached_mask_width: 0,
             cached_mask_height: 0,
             frame_count: 0,
+            watcher,
+            reload_rx,
+            shader_sources: shaders,
+            vertex_shader_module: vertex_module,
+            pipeline_layout,
         })
+    }
+
+    /// Check for shader file updates and reload if necessary.
+    fn check_reload(&mut self) {
+        let Some(rx) = &self.reload_rx else { return; };
+        
+        let mut needs_reload = false;
+        // Drain channel to clear backlog and debounce
+        while let Ok(res) = rx.try_recv() {
+            match res {
+                Ok(event) => {
+                    // Check for modify events (and also create/remove just in case editors do weird atomic saves)
+                    if matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_)) {
+                         needs_reload = true;
+                         info!("Shader file modified: {:?}", event.paths);
+                    }
+                }
+                Err(e) => tracing::warn!("Watch error: {}", e),
+            }
+        }
+
+        if needs_reload {
+            // Re-read and re-compile all shaders that changed (or just all for simplicity)
+            info!("Reloading shaders...");
+            
+            // Re-create pipelines
+            for (i, source) in self.shader_sources.iter_mut().enumerate() {
+                // Clone path to release borrow on source so we can mutate it later
+                let path = match source {
+                     ShaderSource::Glsl { path: Some(p), .. } => p.clone(),
+                     ShaderSource::Wgsl { path: Some(p), .. } => p.clone(),
+                     _ => continue,
+                };
+                
+                // Read file
+                let code = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to read shader file {:?}: {}", path, e);
+                        continue;
+                    }
+                };
+                
+                // Update source in memory
+                match source {
+                    ShaderSource::Glsl { code: c, .. } => *c = code.clone(),
+                    ShaderSource::Wgsl { code: c, .. } => *c = code.clone(),
+                }
+                
+                // Compile
+                let (fragment_wgsl, fragment_entry_point) = match source {
+                     ShaderSource::Glsl { code: glsl, .. } => {
+                         match Self::glsl_to_wgsl(glsl) {
+                             Ok((wgsl, _)) => (wgsl, "main"),
+                             Err(e) => {
+                                 tracing::error!("GLSL compilation error in {:?}: {}", path, e);
+                                 continue;
+                             }
+                         }
+                     }
+                     ShaderSource::Wgsl { code: wgsl, .. } => (wgsl.clone(), "fs_main"),
+                };
+
+                let fragment_module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(&format!("Fragment Shader {}", i)),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Owned(fragment_wgsl)),
+                });
+
+                let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(&format!("Render Pipeline {}", i)),
+                    layout: Some(&self.pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.vertex_shader_module,
+                        entry_point: Some("vs_main"),
+                        buffers: &[QuadVertex::layout()],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &fragment_module,
+                        entry_point: Some(fragment_entry_point),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                
+                // Replace pipeline
+                if i < self.render_pipelines.len() {
+                    self.render_pipelines[i] = render_pipeline;
+                    info!("Successfully reloaded shader {}", i);
+                }
+            }
+        }
     }
 
     /// Update or create cached textures/buffers if dimensions changed
@@ -602,6 +754,9 @@ impl WgpuPipeline {
 
 impl ShaderPipeline for WgpuPipeline {
     fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
+        // Check for hot-reloads
+        self.check_reload();
+
         let start = std::time::Instant::now();
         let rgba_input = input.to_rgba();
         self.frame_count += 1;

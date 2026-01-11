@@ -18,7 +18,7 @@ pub trait ShaderPipeline {
 #[derive(Debug, Clone)]
 pub enum ShaderSource {
     /// GLSL fragment shader source code
-    Glsl(String),
+    Glsl { code: String, path: Option<std::path::PathBuf> },
     /// WGSL shader source code  
-    Wgsl(String),
+    Wgsl { code: String, path: Option<std::path::PathBuf> },
 }

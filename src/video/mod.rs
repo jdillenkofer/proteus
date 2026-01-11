@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;

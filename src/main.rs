@@ -130,7 +130,7 @@ impl ProteusApp {
             for path in &self.args.shader {
                 info!("Loading shader from {:?}", path);
                 let source = fs::read_to_string(path)?;
-                shaders.push(ShaderSource::Glsl(source));
+                shaders.push(ShaderSource::Glsl { code: source, path: Some(path.clone()) });
             }
         }
 
@@ -411,7 +411,7 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
         for path in &args.shader {
             info!("Loading shader from {:?}", path);
             let source = fs::read_to_string(path)?;
-            shaders.push(ShaderSource::Glsl(source));
+            shaders.push(ShaderSource::Glsl { code: source, path: Some(path.clone()) });
         }
     }
 
