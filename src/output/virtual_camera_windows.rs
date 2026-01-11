@@ -66,8 +66,8 @@ pub struct VirtualCameraConfig {
 impl Default for VirtualCameraConfig {
     fn default() -> Self {
         Self {
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
             fps: 30,
         }
     }

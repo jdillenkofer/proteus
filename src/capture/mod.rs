@@ -56,8 +56,8 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             device_index: 0,
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
             fps: 30,
         }
     }

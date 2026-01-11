@@ -44,11 +44,11 @@ struct Args {
     shader: Vec<PathBuf>,
 
     /// Frame width
-    #[arg(long, default_value = "1280")]
+    #[arg(long, default_value = "1920")]
     width: u32,
 
     /// Frame height
-    #[arg(long, default_value = "720")]
+    #[arg(long, default_value = "1080")]
     height: u32,
 
     /// Target frames per second

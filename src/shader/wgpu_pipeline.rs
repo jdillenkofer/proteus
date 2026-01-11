@@ -470,7 +470,7 @@ impl ShaderPipeline for WgpuPipeline {
              mask_result = engine.poll_result();
         }
 
-        // 3. Ensure resources (base size 1280x720, mask size varies)
+        // 3. Ensure resources (base size 1920x1080, mask size varies)
         // If no new mask was polled, we just reuse the old sizes so ensure_resources does nothing.
         let (mask_w, mask_h) = if let Some((_, w, h)) = &mask_result { (*w, *h) } else { (self.cached_mask_width, self.cached_mask_height) };
         // Initial case: if everything is 0, default to 1x1

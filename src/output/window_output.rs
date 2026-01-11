@@ -52,8 +52,8 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             title: "Proteus".to_string(),
-            width: 1280,
-            height: 720,
+            width: 1920,
+            height: 1080,
         }
     }
 }

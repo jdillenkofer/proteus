@@ -116,8 +116,8 @@ cargo run --release -- -s shaders/plasma.frag -s shaders/ripple.frag
 |--------|-------------|---------|
 | `-i, --input <INDEX>` | Camera device index | 0 |
 | `-s, --shader <PATH>` | Path to GLSL fragment shader | None (Passthrough) |
-| `--width <PIXELS>` | Frame width | 1280 |
-| `--height <PIXELS>` | Frame height | 720 |
+| `--width <PIXELS>` | Frame width | 1920 |
+| `--height <PIXELS>` | Frame height | 1080 |
 | `--fps <FPS>` | Target frames per second | 30 |
 | `--output <MODE>` | `window` or `virtual-camera` | window |
 | `--list-devices` | List available cameras | - |
