@@ -31,6 +31,12 @@
      sudo pacman -S v4l2loopback-dkms    # Arch Linux
      ```
 
+3. **Runtime Dependency**:
+   - **FFmpeg**: Must be installed and available in your system PATH (`ffmpeg` command).
+     - **macOS**: `brew install ffmpeg`
+     - **Linux**: `sudo apt install ffmpeg`
+     - **Windows**: Download from [ffmpeg.org](https://ffmpeg.org/download.html) (Windows builds), extract, and add the `bin` folder to your System PATH.
+
 ## Usage
 
 ### Basic Usage (Window Output)
@@ -110,6 +116,25 @@ cargo run --release -- -s shaders/plasma.frag -s shaders/ripple.frag
 
 > **Note**: You may need write permissions for `/dev/video10`. If standard execution fails, try running with `sudo` or adding your user to the `video` group.
 
+### Video & Image Textures
+
+You can provide video files (MP4, MKV, MOV) or images (PNG, JPG) as inputs for shaders. These are bound to texture slots (`t_image0`, `t_image1`, etc.) in the order they appear in the command line.
+
+**Example**:
+```bash
+# Slot 0 = my_video.mp4, Slot 1 = overlay.png
+cargo run --release -- --video my_video.mp4 --image overlay.png --shader shaders/mix_video.frag
+```
+
+- **Video Playback**: Videos are decoded using your system's `ffmpeg` CLI, ensuring broad format support without complex build dependencies.
+- **Interleaved Order**: The order of `--video` and `--image` flags determines the slot index.
+  ```bash
+  cargo run -- --image bg.png --video v1.mp4 --video v2.mp4
+  # t_image0 = bg.png
+  # t_image1 = v1.mp4
+  # t_image2 = v2.mp4
+  ```
+
 ## Configuration Options
 
 | Option | Description | Default |
@@ -120,6 +145,8 @@ cargo run --release -- -s shaders/plasma.frag -s shaders/ripple.frag
 | `--height <PIXELS>` | Frame height | 1080 |
 | `--fps <FPS>` | Target frames per second | 30 |
 | `--output <MODE>` | `window` or `virtual-camera` | window |
+| `--image <PATH>` | Load image into next available texture slot | - |
+| `--video <PATH>` | Load video into next available texture slot| - |
 | `--list-devices` | List available cameras | - |
 
 ## License

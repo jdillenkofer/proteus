@@ -29,6 +29,30 @@ float hash(float n) {
     return fract(sin(n) * 43758.5453);
 }
 
+// Helper to sample texture with "contain" aspect ratio (letterboxing)
+vec4 sample_letterboxed(texture2D t, sampler s, vec2 uv) {
+    ivec2 tex_size = textureSize(sampler2D(t, s), 0);
+    float tex_aspect = 1.0;
+    if (tex_size.x > 0 && tex_size.y > 0) {
+        tex_aspect = float(tex_size.x) / float(tex_size.y);
+    }
+    float screen_aspect = width / height;
+    
+    if (screen_aspect > tex_aspect) {
+        float scale = screen_aspect / tex_aspect;
+        uv.x = (uv.x - 0.5) * scale + 0.5;
+    } else {
+        float scale = tex_aspect / screen_aspect;
+        uv.y = (uv.y - 0.5) * scale + 0.5;
+    }
+    
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    } else {
+        return texture(sampler2D(t, s), uv);
+    }
+}
+
 void main() {
     vec2 uv = v_tex_coords;
     
@@ -74,8 +98,8 @@ void main() {
         webcam = texture(sampler2D(t_texture, s_sampler), glitchUV);
     }
     
-    // Sample the hidden image
-    vec4 hiddenImage = texture(sampler2D(t_image0, s_sampler), glitchUV);
+    // Sample the hidden image (letterboxed)
+    vec4 hiddenImage = sample_letterboxed(t_image0, s_sampler, glitchUV);
     
     // Block-based reveal (random rectangles show the hidden image)
     float blockSize = 0.05;

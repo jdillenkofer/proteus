@@ -2,7 +2,7 @@
 
 mod wgpu_pipeline;
 
-pub use wgpu_pipeline::WgpuPipeline;
+pub use wgpu_pipeline::{TextureSlot, WgpuPipeline};
 
 use crate::frame::VideoFrame;
 use anyhow::Result;
