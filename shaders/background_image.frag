@@ -15,7 +15,29 @@ layout(location=0) in vec2 v_tex_coords;
 layout(location=0) out vec4 f_color;
 
 void main() {
-    float mask = texture(sampler2D(t_mask, s_sampler), v_tex_coords).r;
+    // Apply Gaussian blur to the mask to smooth pixelated edges
+    ivec2 mask_size = textureSize(sampler2D(t_mask, s_sampler), 0);
+    vec2 texel_size = 1.0 / vec2(mask_size);
+    
+    // 13x13 Gaussian blur with sigma ~= 4
+    float mask = 0.0;
+    float total_weight = 0.0;
+    const int radius = 6;
+    const float sigma = 4.0;
+    
+    for (int y = -radius; y <= radius; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            float weight = exp(-float(x*x + y*y) / (2.0 * sigma * sigma));
+            vec2 offset = vec2(float(x), float(y)) * texel_size;
+            mask += texture(sampler2D(t_mask, s_sampler), v_tex_coords + offset).r * weight;
+            total_weight += weight;
+        }
+    }
+    mask /= total_weight;
+    
+    // Apply smoothstep for crisper transitions
+    mask = smoothstep(0.0, 1.0, mask);
+    
     vec4 person_color = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
     // Calculate aspect-correct UVs for the video (slot 0) using textureSize
     // We want "contain" style (letterboxing): entire video visible, black bars if needed.
@@ -43,12 +65,9 @@ void main() {
         float scale = video_aspect / screen_aspect;
         uv.y = (uv.y - 0.5) * scale + 0.5;
     }
-    
+    // Black bars for out-of-bounds UVs (letterboxing)
     vec4 background_color;
-    
-    // Check if UVs are out of bounds (0..1)
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        // Black bars
         background_color = vec4(0.0, 0.0, 0.0, 1.0);
     } else {
         background_color = texture(sampler2D(t_image0, s_sampler), uv);
