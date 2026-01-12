@@ -82,8 +82,8 @@ pub struct WgpuPipeline {
     segmentation_engine: Option<crate::ml::AsyncSegmentationEngine>,
     mask_texture: wgpu::Texture,
     image_textures: [wgpu::Texture; 4],
-    loaded_textures: [Option<wgpu::Texture>; 4], // Keep original loaded textures to avoid reloading images
-    current_video_texture_sizes: [Option<(u32, u32)>; 4],
+    _loaded_textures: [Option<wgpu::Texture>; 4], // Keep original loaded textures to avoid reloading images
+    _current_video_texture_sizes: [Option<(u32, u32)>; 4],
     /// Video players for dynamic texture slots
     video_players: Vec<VideoPlayer>,
     /// Which texture slots are videos (index into video_players)
@@ -103,7 +103,7 @@ pub struct WgpuPipeline {
     // Shader hot-reloading
     pipeline_mask_outputs: Vec<bool>,
     mask_targets: Vec<Option<wgpu::Texture>>,
-    watcher: Option<RecommendedWatcher>,
+    _watcher: Option<RecommendedWatcher>,
     reload_rx: Option<Receiver<std::result::Result<Event, notify::Error>>>,
     shader_sources: Vec<ShaderSource>, // Keep sources to re-compile
     vertex_shader_module: wgpu::ShaderModule,
@@ -483,8 +483,8 @@ impl WgpuPipeline {
             segmentation_engine,
             mask_texture,
             image_textures,
-            loaded_textures: [None, None, None, None], // Consumed above
-            current_video_texture_sizes: [None; 4],
+            _loaded_textures: [None, None, None, None], // Consumed above
+            _current_video_texture_sizes: [None; 4],
             video_players,
             video_slot_map,
             input_texture: None,
@@ -496,7 +496,7 @@ impl WgpuPipeline {
             cached_mask_width: 0,
             cached_mask_height: 0,
             frame_count: 0,
-            watcher,
+            _watcher: watcher,
             reload_rx,
             shader_sources: shaders,
             vertex_shader_module: vertex_module,
@@ -989,17 +989,17 @@ impl ShaderPipeline for WgpuPipeline {
 
             // If this pipeline outputs a mask, add the second attachment
             // We need to keep a reference to the view alive, so let's create it properly
-            let mask_view: Option<wgpu::TextureView>;
+            let _mask_view: Option<wgpu::TextureView>;
             if let Some(mask_texture) = self.mask_targets.get(i).and_then(|t| t.as_ref()) {
-                mask_view = Some(mask_texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                _mask_view = Some(mask_texture.create_view(&wgpu::TextureViewDescriptor::default()));
                 color_attachments.push(Some(wgpu::RenderPassColorAttachment {
-                    view: mask_view.as_ref().unwrap(),
+                    view: _mask_view.as_ref().unwrap(),
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 }));
             } else {
-                 mask_view = None;
+                 _mask_view = None;
             }
 
             {

@@ -27,9 +27,9 @@ pub struct VideoPlayer {
     /// Decode thread handle
     _thread: JoinHandle<()>,
     /// Signal to stop the thread
-    stop_signal: Arc<Mutex<bool>>,
+    _stop_signal: Arc<Mutex<bool>>,
     /// Frame rate (fps) - needed to timestamp frames roughly if timestamps aren't piped
-    fps: f32,
+    _fps: f32,
 }
 
 /// A decoded video frame with RGBA data.
@@ -138,8 +138,8 @@ impl VideoPlayer {
              duration,
              start_time: None,
              _thread: thread,
-             stop_signal,
-             fps,
+             _stop_signal: stop_signal,
+             _fps: fps,
         })
     }
 
