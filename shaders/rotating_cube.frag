@@ -14,6 +14,7 @@ layout(set=0, binding=3) uniform texture2D t_mask;
 
 layout(location=0) in vec2 v_tex_coords;
 layout(location=0) out vec4 f_color;
+layout(location=1) out float f_mask_out;
 
 #define PI 3.14159265359
 
@@ -124,8 +125,10 @@ void main() {
         // Get UV for this face
         vec2 faceUV = getFaceUV(hitPos, normal, boxSize);
         
-        // Sample the camera texture
+        // Sample the camera texture and mask
         vec4 texColor = texture(sampler2D(t_texture, s_sampler), faceUV);
+        float mask_val = texture(sampler2D(t_mask, s_sampler), faceUV).r;
+        f_mask_out = mask_val;
         
         // Simple lighting
         vec3 worldNormal = rot * normal;
@@ -153,6 +156,9 @@ void main() {
         vec2 grid = fract(ndc * 10.0);
         float gridLine = step(0.95, max(grid.x, grid.y));
         color += vec3(0.05) * gridLine * (1.0 - gradient);
+        
+        // No person in background
+        f_mask_out = 0.0;
     }
     
     f_color = vec4(color, 1.0);
