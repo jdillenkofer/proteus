@@ -34,23 +34,36 @@ impl CaptureBackend for NokhwaCapture {
         // USB webcams on all platforms typically support MJPEG for high resolutions.
         // We try uncompressed high-res first (for macOS built-in), then MJPEG (for USB cameras).
         let seed_formats = vec![
-            // === High-res uncompressed (macOS FaceTime cameras, some USB cameras) ===
-            // NV12 is the native format for many macOS cameras
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 30),
-            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::NV12, 30),
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::YUYV, 30),
-            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 30),
+            // Priority: Highest resolution -> Highest framerate -> NV12 > YUYV > MJPEG
             
-            // === MJPEG (USB webcams - hardware compressed, lower bandwidth) ===
+            // === 1080p @ 30fps ===
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 30),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::YUYV, 30),
             CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 30),
+            
+            // === 1080p @ 25fps ===
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 25),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::YUYV, 25),
             CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 25),
+            
+            // === 1080p @ 15fps ===
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 15),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::YUYV, 15),
+            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 15),
+            
+            // === 720p @ 30fps ===
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::NV12, 30),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 30),
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30),
+            
+            // === 720p @ 25fps ===
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::NV12, 25),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 25),
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 25),
             
-            // === Lower FPS variants (for bandwidth-constrained scenarios) ===
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::NV12, 15),
+            // === 720p @ 15fps ===
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::NV12, 15),
-            CameraFormat::new(Resolution::new(1920, 1080), FrameFormat::MJPEG, 15),
+            CameraFormat::new(Resolution::new(1280, 720), FrameFormat::YUYV, 15),
             CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 15),
             
             // === VGA fallbacks (last resort) ===
@@ -86,26 +99,30 @@ impl CaptureBackend for NokhwaCapture {
         // Sometimes this returns empty, in which case we just stick with the working seed.
         if let Ok(supported_formats) = camera.compatible_camera_formats() {
             if !supported_formats.is_empty() {
-                // Find best match for USER CONFIG
-                let target_res = Resolution::new(config.width, config.height);
+                // Find best format: prioritize highest resolution, then framerate, then format type
                 let mut best_format = None;
-                let mut best_score = -10000;
+                let mut best_score: i64 = -1;
 
                 for fmt in &supported_formats {
-                    let mut score = 0;
-                    if fmt.resolution() == target_res { score += 1000; }
-                    else {
-                         let w_diff = (fmt.width() as i32 - config.width as i32).abs();
-                         let h_diff = (fmt.height() as i32 - config.height as i32).abs();
-                         score -= w_diff + h_diff;
+                    let mut score: i64 = 0;
+                    
+                    // 1. Highest resolution first (primary criterion)
+                    // Use total pixels as score multiplier for resolution priority
+                    let resolution_score = (fmt.width() as i64) * (fmt.height() as i64);
+                    score += resolution_score;
+                    
+                    // 2. Highest framerate (secondary criterion)
+                    // Scale by 1000 to make it significant but less than resolution differences
+                    score += (fmt.frame_rate() as i64) * 1000;
+                    
+                    // 3. Format priority: NV12 > YUYV > MJPEG (tertiary criterion)
+                    // Small values so they only break ties between otherwise equal formats
+                    match fmt.format() {
+                        FrameFormat::NV12 => score += 30,
+                        FrameFormat::YUYV => score += 20,
+                        FrameFormat::MJPEG => score += 10,
+                        _ => {}
                     }
-                    if fmt.frame_rate() == config.fps { score += 500; }
-                    else if fmt.frame_rate() > config.fps { score += 100; }
-                    // Strongly prefer MJPEG - it has hardware decode and less USB bandwidth
-                    if fmt.format() == FrameFormat::MJPEG { score += 200; }
-                    // Avoid NV12/YUV on Windows - software conversion is slow
-                    if fmt.format() == FrameFormat::NV12 { score -= 100; }
-                    if fmt.format() == FrameFormat::YUYV { score -= 50; }
 
                     if score > best_score {
                         best_score = score;
