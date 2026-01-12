@@ -104,6 +104,13 @@ impl CaptureBackend for NokhwaCapture {
                 let mut best_score: i64 = -1;
 
                 for fmt in &supported_formats {
+                    // Only consider 16:9 aspect ratio formats
+                    // 16:9 means width/height = 16/9 ≈ 1.777...
+                    // Check: width * 9 == height * 16
+                    if fmt.width() * 9 != fmt.height() * 16 {
+                        continue;
+                    }
+                    
                     let mut score: i64 = 0;
                     
                     // 1. Highest resolution first (primary criterion)
