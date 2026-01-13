@@ -95,23 +95,19 @@ impl SegmentationEngine {
         let orig_w = frame.width;
         let orig_h = frame.height;
         
-        // 1. Create RGB image from RGBA frame
-        let rgba_img = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(orig_w, orig_h, frame.data.clone())
+        // 1. Create zero-copy RGBA view of the frame
+        // This avoids cloning the 8MB frame buffer
+        let rgba_img = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(orig_w, orig_h, &frame.data)
             .ok_or_else(|| anyhow!("Failed to create image buffer"))?;
-        
-        // Convert RGBA to RGB
-        let rgb_img: RgbImage = ImageBuffer::from_fn(orig_w, orig_h, |x, y| {
-            let p = rgba_img.get_pixel(x, y);
-            Rgb([p[0], p[1], p[2]])
-        });
         
         // 2. Letterbox: resize maintaining aspect ratio, pad to MODEL_WIDTH x MODEL_HEIGHT
         let scale = (MODEL_WIDTH as f32 / orig_w as f32).min(MODEL_HEIGHT as f32 / orig_h as f32);
         let scaled_w = (orig_w as f32 * scale).round() as u32;
         let scaled_h = (orig_h as f32 * scale).round() as u32;
         
-        // Resize preserving aspect ratio (use Triangle for smoother edges)
-        let resized = image::imageops::resize(&rgb_img, scaled_w, scaled_h, FilterType::Triangle);
+        // Resize RGBA directly using Triangle (bilinear) to smooth temporal noise
+        // This is much faster than converting 2MP to RGB first then resizing
+        let resized_rgba = image::imageops::resize(&rgba_img, scaled_w, scaled_h, FilterType::Triangle);
         
         // Create black canvas and paste resized image centered
         let offset_x = (MODEL_WIDTH - scaled_w) / 2;
@@ -120,11 +116,11 @@ impl SegmentationEngine {
         // Create black RGB canvas
         let mut canvas: RgbImage = ImageBuffer::from_pixel(MODEL_WIDTH, MODEL_HEIGHT, Rgb([0, 0, 0]));
         
-        // Copy resized image onto canvas
+        // Copy resized RGBA image onto RGB canvas (dropping alpha)
         for y in 0..scaled_h {
             for x in 0..scaled_w {
-                let pixel = resized.get_pixel(x, y);
-                canvas.put_pixel(x + offset_x, y + offset_y, *pixel);
+                let pixel = resized_rgba.get_pixel(x, y);
+                canvas.put_pixel(x + offset_x, y + offset_y, Rgb([pixel[0], pixel[1], pixel[2]]));
             }
         }
         
