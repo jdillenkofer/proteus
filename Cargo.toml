@@ -1,6 +1,6 @@
 [package]
 name = "proteus"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Cross-platform shader webcam transformer"
 
@@ -26,6 +26,7 @@ ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
 image = "0.25"
 ndarray = "0.15"
 notify = "8.2.0"
+
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nokhwa = { version = "0.10", features = ["input-avfoundation"] }
