@@ -1,8 +1,10 @@
 //! GPU shader pipeline.
 
 mod wgpu_pipeline;
+pub mod gpu_context;
 
 pub use wgpu_pipeline::{TextureSlot, WgpuPipeline};
+pub use gpu_context::GpuContext;
 
 use crate::frame::VideoFrame;
 use anyhow::Result;

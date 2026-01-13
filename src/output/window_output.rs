@@ -2,9 +2,10 @@
 
 use super::OutputBackend;
 use crate::frame::{QuadVertex, VideoFrame};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::borrow::Cow;
 use std::sync::Arc;
+use crate::shader::gpu_context::GpuContext;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -61,8 +62,7 @@ impl Default for WindowConfig {
 /// Handles window rendering state.
 pub struct WindowRenderer {
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    context: Arc<GpuContext>,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -75,30 +75,12 @@ pub struct WindowRenderer {
 
 impl WindowRenderer {
     /// Creates a new window renderer.
-    pub fn new(window: Arc<Window>) -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
-
+    pub fn new(window: Arc<Window>, context: Arc<GpuContext>) -> Result<Self> {
+        let instance = &context.instance;
+        let adapter = &context.adapter;
+        let device = &context.device;
+        
         let surface = instance.create_surface(window.clone())?;
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| anyhow!("Failed to find GPU adapter: {:?}", e))?;
-
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Proteus Window Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                ..Default::default()
-            },
-        ))?;
 
         let size = window.inner_size();
         let surface_caps = surface.get_capabilities(&adapter);
@@ -219,8 +201,7 @@ impl WindowRenderer {
 
         Ok(Self {
             surface,
-            device,
-            queue,
+            context,
             config,
             render_pipeline,
             vertex_buffer,
@@ -242,7 +223,7 @@ impl WindowRenderer {
         if new_size.width > 0 && new_size.height > 0 {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
+            self.surface.configure(&self.context.device, &self.config);
         }
     }
 
@@ -260,7 +241,7 @@ impl WindowRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create texture from frame
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Frame Texture"),
             size: wgpu::Extent3d {
                 width: rgba_frame.width,
@@ -275,7 +256,7 @@ impl WindowRenderer {
             view_formats: &[],
         });
 
-        self.queue.write_texture(
+        self.context.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
@@ -297,7 +278,7 @@ impl WindowRenderer {
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Frame Bind Group"),
             layout: &self.bind_group_layout,
             entries: &[
@@ -313,7 +294,7 @@ impl WindowRenderer {
         });
 
         let mut encoder = self
-            .device
+            .context.device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Window Render Encoder"),
             });
@@ -343,7 +324,66 @@ impl WindowRenderer {
             render_pass.draw_indexed(0..6, 0, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.context.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        Ok(())
+    }
+
+    /// Renders the given texture view directly to the window.
+    pub fn render_texture(&mut self, texture_view: &wgpu::TextureView) -> Result<()> {
+        let output = self.surface.get_current_texture()?;
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Frame Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .context.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Window Render Encoder"),
+            });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Window Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        self.context.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())

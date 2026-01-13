@@ -6,7 +6,10 @@ use proteus::capture::{AsyncCapture, CaptureBackend, CaptureConfig, NokhwaCaptur
 use proteus::output::window_output::WindowRenderer;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
-use proteus::shader::{ShaderPipeline, ShaderSource, TextureSlot, WgpuPipeline};
+use proteus::shader::{ShaderSource, TextureSlot, WgpuPipeline};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use proteus::shader::ShaderPipeline;
+use proteus::shader::gpu_context::GpuContext;
 use proteus::video::VideoPlayer;
 use std::fs;
 use std::path::PathBuf;
@@ -80,6 +83,7 @@ struct ProteusApp {
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
     capture: Option<AsyncCapture>,
+    context: Option<Arc<GpuContext>>,
     pipeline: Option<WgpuPipeline>,
     last_frame_time: Instant,
     frame_duration: Duration,
@@ -97,6 +101,7 @@ impl ProteusApp {
             window: None,
             renderer: None,
             capture: None,
+            context: None,
             pipeline: None,
             last_frame_time: Instant::now(),
             frame_duration,
@@ -156,7 +161,10 @@ impl ProteusApp {
             }
         }
         
-        self.pipeline = Some(WgpuPipeline::new(self.args.width, self.args.height, shaders, texture_sources)?);
+
+        
+        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("GPU context not initialized"))?;
+        self.pipeline = Some(WgpuPipeline::new(context, self.args.width, self.args.height, shaders, texture_sources)?);
         info!("Shader pipeline initialized");
 
         Ok(())
@@ -184,19 +192,21 @@ impl ProteusApp {
 
         // Get latest frame (non-blocking)
         if let Some(frame) = capture.get_latest_frame() {
-            // Process through shader
+            // Calculate time
             let time = self.start_time.elapsed().as_secs_f32();
-            match pipeline.process_frame(&frame, time) {
-                Ok(processed) => {
-                    // Display in window
-                    renderer.set_frame(processed);
-                    if let Err(e) = renderer.render() {
-                        error!("Render error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Shader processing error: {}", e);
-                }
+            
+            // Optimized path: Render directly on GPU without CPU readback
+            if let Err(e) = pipeline.process_frame_gpu(&frame, time) {
+                error!("Shader processing error: {}", e);
+                return;
+            }
+
+            // Display in window by sharing texture
+            if let Some(texture) = pipeline.output_texture() {
+                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                 if let Err(e) = renderer.render_texture(&view) {
+                      error!("Render error: {}", e);
+                 }
             }
         }
     }
@@ -218,21 +228,33 @@ impl ApplicationHandler for ProteusApp {
                 let window = Arc::new(window);
                 self.window = Some(window.clone());
 
-                // Create renderer
-                match WindowRenderer::new(window) {
-                    Ok(renderer) => {
-                        self.renderer = Some(renderer);
-                        info!("Window created successfully");
+                // Create GPU context shared between pipeline and renderer
+                match GpuContext::new(Some(&window)) {
+                    Ok(context) => {
+                        let context = Arc::new(context);
+                        self.context = Some(context.clone());
 
-                        // Initialize capture and pipeline
-                        if let Err(e) = self.initialize() {
-                            error!("Initialization error: {}", e);
-                            event_loop.exit();
+                        // Create renderer
+                        match WindowRenderer::new(window, context) {
+                            Ok(renderer) => {
+                                self.renderer = Some(renderer);
+                                info!("Window created successfully");
+
+                                // Initialize capture and pipeline
+                                if let Err(e) = self.initialize() {
+                                    error!("Initialization error: {}", e);
+                                    event_loop.exit();
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to create renderer: {}", e);
+                                event_loop.exit();
+                            }
                         }
                     }
                     Err(e) => {
-                        error!("Failed to create renderer: {}", e);
-                        event_loop.exit();
+                         error!("Failed to create GPU context: {}", e);
+                         event_loop.exit();
                     }
                 }
             }
@@ -359,7 +381,7 @@ fn run_window_mode(args: Args) -> Result<()> {
     ordered_inputs.sort_by_key(|k| k.0);
 
     let mut app = ProteusApp::new(args, ordered_inputs.into_iter().map(|(_, t, p)| (t, p)).collect());
-    app.initialize()?;
+
 
     // Create event loop
     let event_loop = EventLoop::new()?;
@@ -464,7 +486,10 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
         }
     }
     
-    let mut pipeline = WgpuPipeline::new(args.width, args.height, shaders, texture_sources)?;
+    // Initialize GPU Context (headless/no-window)
+    let context = Arc::new(GpuContext::new(None)?);
+
+    let mut pipeline = WgpuPipeline::new(context, args.width, args.height, shaders, texture_sources)?;
     info!("Shader pipeline initialized");
 
     // Initialize virtual camera output

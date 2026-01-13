@@ -13,6 +13,8 @@ use wgpu::util::DeviceExt;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+use crate::shader::gpu_context::GpuContext;
 
 /// Source for a texture slot - either a static image or a video.
 pub enum TextureSlot {
@@ -69,8 +71,7 @@ pub struct Uniforms {
 
 /// GPU shader pipeline using wgpu.
 pub struct WgpuPipeline {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    context: Arc<GpuContext>,
     render_pipelines: Vec<wgpu::RenderPipeline>,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -108,6 +109,11 @@ pub struct WgpuPipeline {
     shader_sources: Vec<ShaderSource>, // Keep sources to re-compile
     vertex_shader_module: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
+    
+    // sRGB Conversion resources
+    srgb_pipeline: wgpu::RenderPipeline,
+    srgb_output_texture: Option<wgpu::Texture>,
+    srgb_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl WgpuPipeline {
@@ -115,32 +121,14 @@ impl WgpuPipeline {
     /// Segmentation is automatically enabled if any shader uses the mask binding (binding 3).
     /// Texture sources (up to 4) are used for bindings 4-7 in the order specified.
     pub fn new(
+        context: Arc<GpuContext>,
         width: u32,
         height: u32,
         shaders: Vec<ShaderSource>,
         texture_sources: Vec<TextureSlot>,
     ) -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| anyhow!("Failed to find GPU adapter: {:?}", e))?;
-
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Proteus Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                ..Default::default()
-            },
-        ))?;
+        let device = &context.device;
+        let queue = &context.queue;
 
         // Prepare shader sources and detect if any shader uses the mask binding or outputs a mask
         let mut needs_segmentation = false;
@@ -277,8 +265,11 @@ impl WgpuPipeline {
                 source: wgpu::ShaderSource::Wgsl(Cow::Owned(fragment_wgsl.to_string())),
             });
 
+            // Use Rgba16Float for all passes to maintain precision
+            let color_format = wgpu::TextureFormat::Rgba16Float;
+
             let mut targets = vec![Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format: color_format,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })];
@@ -323,6 +314,46 @@ impl WgpuPipeline {
             });
             render_pipelines.push(render_pipeline);
         }
+
+        // Create sRGB Blit Pipeline (for readback conversion)
+        let srgb_fragment_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+             label: Some("sRGB Blit Fragment Shader"),
+             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DEFAULT_FRAGMENT_SHADER)),
+        });
+
+        let srgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sRGB Blit Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_module,
+                entry_point: Some("vs_main"),
+                buffers: &[QuadVertex::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &srgb_fragment_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -474,8 +505,7 @@ impl WgpuPipeline {
         });
 
         Ok(Self {
-            device,
-            queue,
+            context,
             render_pipelines,
             vertex_buffer,
             index_buffer,
@@ -507,6 +537,9 @@ impl WgpuPipeline {
             pipeline_layout,
             pipeline_mask_outputs,
             mask_targets: Vec::new(),
+            srgb_pipeline,
+            srgb_output_texture: None,
+            srgb_bind_group: None,
         })
     }
 
@@ -575,13 +608,16 @@ impl WgpuPipeline {
                      }
                 };
 
-                let fragment_module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                let fragment_module = self.context.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(&format!("Fragment Shader {}", i)),
                     source: wgpu::ShaderSource::Wgsl(Cow::Owned(fragment_wgsl)),
                 });
 
+                // Use Rgba16Float for all passes to maintain precision
+                let color_format = wgpu::TextureFormat::Rgba16Float;
+
                 let mut targets = vec![Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: color_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })];
@@ -594,7 +630,7 @@ impl WgpuPipeline {
                     }));
                 }
 
-                let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                let render_pipeline = self.context.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(&format!("Render Pipeline {}", i)),
                     layout: Some(&self.pipeline_layout),
                     vertex: wgpu::VertexState {
@@ -649,7 +685,7 @@ impl WgpuPipeline {
         
         // 1. Mask Texture (Create if size changed)
         if self.cached_mask_width != mask_w || self.cached_mask_height != mask_h {
-            self.mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            self.mask_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Segmentation Mask"),
                 size: wgpu::Extent3d { width: mask_w, height: mask_h, depth_or_array_layers: 1 },
                 mip_level_count: 1,
@@ -662,7 +698,7 @@ impl WgpuPipeline {
         }
 
         // 2. Input Texture
-        self.input_texture = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+        self.input_texture = Some(self.context.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Input Texture"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -673,29 +709,42 @@ impl WgpuPipeline {
             view_formats: &[],
         }));
 
-        // 2. Output Textures (Intermediate frames)
+        // 2. Output Textures - Use Rgba16Float for all passes to maintain precision
         self.output_textures.clear();
-        for i in 0..self.render_pipelines.len() {
-            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+        let num_pipelines = self.render_pipelines.len();
+        for i in 0..num_pipelines {
+            let tex = self.context.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("Intermediate Texture {}", i)),
                 size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format: wgpu::TextureFormat::Rgba16Float,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             self.output_textures.push(tex);
         }
 
-        // 3. Readback Buffer
+        // 3. Readback Buffer (4 bytes per pixel for Rgba8UnormSrgb, used after blit)
         let size = (self.output_width * self.output_height * 4) as wgpu::BufferAddress;
-        self.readback_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.readback_buffer = Some(self.context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Readback Buffer"),
             size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
+        }));
+
+        // sRGB Output Texture (For Readback)
+        self.srgb_output_texture = Some(self.context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sRGB Output Texture"),
+            size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
         }));
 
         // 3. Mask Targets (For shaders that output mask)
@@ -703,7 +752,7 @@ impl WgpuPipeline {
         // Re-do mask targets logic: strict one-to-one mapping
         self.mask_targets = (0..self.render_pipelines.len()).map(|i| {
              if self.pipeline_mask_outputs.get(i).copied().unwrap_or(false) {
-                 Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                 Some(self.context.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(&format!("Intermediate Mask Texture {}", i)),
                     size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
                     mip_level_count: 1,
@@ -741,7 +790,7 @@ impl WgpuPipeline {
                 self.output_textures[i-1].create_view(&wgpu::TextureViewDescriptor::default())
             };
 
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&format!("Bind Group {}", i)),
                 layout: &self.bind_group_layout,
                 entries: &[
@@ -757,10 +806,29 @@ impl WgpuPipeline {
             });
             self.bind_groups.push(bind_group);
             
-            // If this pipeline outputs a mask, the next one will use it.
             if let Some(view) = &mask_target_views[i] {
                 current_mask_view = view;
             }
+        }
+        
+        // Create sRGB Bind Group (Reuse layout, bind final output as input)
+        if let Some(final_output) = self.output_textures.last() {
+             let input_view = final_output.create_view(&wgpu::TextureViewDescriptor::default());
+             let srgb_bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sRGB Blit Bind Group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&initial_mask_view) }, // Dummy
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&image_views[0]) }, // Dummy
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&image_views[1]) }, // Dummy
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&image_views[2]) }, // Dummy
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&image_views[3]) }, // Dummy
+                ],
+            });
+            self.srgb_bind_group = Some(srgb_bind_group);
         }
 
         self.cached_width = width;
@@ -847,19 +915,22 @@ impl WgpuPipeline {
         Ok((wgsl, uses_mask, outputs_mask))
     }
 
-    pub fn device_and_queue(&self) -> (&wgpu::Device, &wgpu::Queue) { (&self.device, &self.queue) }
+    pub fn device_and_queue(&self) -> (&wgpu::Device, &wgpu::Queue) { (&self.context.device, &self.context.queue) }
     pub fn render_pipelines(&self) -> &[wgpu::RenderPipeline] { &self.render_pipelines }
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout { &self.bind_group_layout }
     pub fn buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer) { (&self.vertex_buffer, &self.index_buffer) }
     pub fn sampler(&self) -> &wgpu::Sampler { &self.sampler }
-}
 
-impl ShaderPipeline for WgpuPipeline {
-    fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
+    /// Returns the current output texture.
+    pub fn output_texture(&self) -> Option<&wgpu::Texture> {
+        self.output_textures.last()
+    }
+
+    /// Process a frame on the GPU and leave the result in the output texture.
+    pub fn process_frame_gpu(&mut self, input: &VideoFrame, time: f32) -> Result<()> {
         // Check for hot-reloads
         self.check_reload();
 
-        let start = std::time::Instant::now();
         let rgba_input = input.to_rgba();
         self.frame_count += 1;
 
@@ -890,7 +961,7 @@ impl ShaderPipeline for WgpuPipeline {
             height: self.output_height as f32, 
             seed: rand::random::<f32>(),
         };
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        self.context.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
         // 4. Upload Mask
         if let Some((mask_data, w, h)) = mask_result {
@@ -908,7 +979,7 @@ impl ShaderPipeline for WgpuPipeline {
                 std::borrow::Cow::Owned(aligned)
             };
 
-            self.queue.write_texture(
+            self.context.queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &self.mask_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 &upload_data,
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_width as u32), rows_per_image: Some(h) },
@@ -929,7 +1000,7 @@ impl ShaderPipeline for WgpuPipeline {
                     if current_texture.width() != frame.width || current_texture.height() != frame.height {
                         info!("Resizing video texture slot {} to {}x{}", slot_index, frame.width, frame.height);
                         
-                        let new_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                        let new_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
                             label: Some(&format!("Video Texture {}", slot_index)),
                             size: wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
                             mip_level_count: 1,
@@ -945,7 +1016,7 @@ impl ShaderPipeline for WgpuPipeline {
                     }
 
                     // Upload video frame to texture
-                    self.queue.write_texture(
+                    self.context.queue.write_texture(
                         wgpu::TexelCopyTextureInfo { 
                             texture: &self.image_textures[slot_index], 
                             mip_level: 0, 
@@ -971,7 +1042,7 @@ impl ShaderPipeline for WgpuPipeline {
         }
 
         let upload_start = std::time::Instant::now();
-        self.queue.write_texture(
+        self.context.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: self.input_texture.as_ref().unwrap(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             &rgba_input.data,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rgba_input.width * 4), rows_per_image: Some(rgba_input.height) },
@@ -980,7 +1051,7 @@ impl ShaderPipeline for WgpuPipeline {
         tracing::debug!("  [Perf] Texture Upload: {:?}", upload_start.elapsed());
 
         let shader_start = std::time::Instant::now();
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
+        let mut encoder = self.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
 
         for (i, pipeline) in self.render_pipelines.iter().enumerate() {
             let output_view = self.output_textures[i].create_view(&wgpu::TextureViewDescriptor::default());
@@ -1024,25 +1095,67 @@ impl ShaderPipeline for WgpuPipeline {
             }
         }
 
-        let final_texture = self.output_textures.last().unwrap();
+        self.context.queue.submit(std::iter::once(encoder.finish()));
+        tracing::debug!("  [Perf] Shader Dispatch: {:?}", shader_start.elapsed());
+        
+        Ok(())
+    }
+}
+
+impl ShaderPipeline for WgpuPipeline {
+    fn process_frame(&mut self, input: &VideoFrame, time: f32) -> Result<VideoFrame> {
+        self.process_frame_gpu(input, time)?;
+        let start = std::time::Instant::now();
+
+        // Perform sRGB Resolve Pass and Readback
+        let mut encoder = self.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Readback Encoder") });
+
+        // 1. sRGB Resolve Pass: Linear F16 -> sRGB U8
+
+        {
+             let srgb_view = self.srgb_output_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
+             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sRGB Resolve Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &srgb_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            render_pass.set_pipeline(&self.srgb_pipeline);
+            render_pass.set_bind_group(0, self.srgb_bind_group.as_ref().unwrap(), &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+        }
+
+        // 2. Copy sRGB texture to buffer
         encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: final_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: self.srgb_output_texture.as_ref().unwrap(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo { buffer: self.readback_buffer.as_ref().unwrap(), layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.output_width * 4), rows_per_image: Some(self.output_height) } },
             wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
         );
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-        tracing::debug!("  [Perf] Shader Dispatch: {:?}", shader_start.elapsed());
+        self.context.queue.submit(std::iter::once(encoder.finish()));
 
         let readback_start = std::time::Instant::now();
         let buffer_slice = self.readback_buffer.as_ref().unwrap().slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| sender.send(result).unwrap());
-        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        self.context.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         receiver.recv()??;
 
         let data = buffer_slice.get_mapped_range();
+        
+        // Data is now already correct sRGB u8. No conversion needed.
         let output_data = data.to_vec();
+        
         drop(data);
         self.readback_buffer.as_ref().unwrap().unmap();
         
