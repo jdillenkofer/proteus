@@ -139,6 +139,19 @@ cargo run --release -- --video my_video.mp4 --image overlay.png --shader shaders
   # t_image2 = v2.mp4
   ```
 
+### YouTube Support
+
+Proteus supports playing YouTube videos directly by providing the URL as a video input. 
+
+**Requirements**: 
+- `yt-dlp` must be installed and available in your system PATH.
+
+**Example**:
+```bash
+cargo run --release -- --video "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+Proteus will automatically resolve the stream using `yt-dlp` and pipe it to `ffmpeg`.
+
 ## Configuration Options
 
 | Option | Description | Default |

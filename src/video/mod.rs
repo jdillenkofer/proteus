@@ -17,6 +17,8 @@ pub struct VideoPlayer {
     frame_rx: Receiver<DecodedFrame>,
     /// Current frame cached for display
     current_frame: Option<DecodedFrame>,
+    /// Next frame buffered (waiting for timestamp)
+    next_frame: Option<DecodedFrame>,
     /// Video dimensions
     pub width: u32,
     pub height: u32,
@@ -47,15 +49,40 @@ impl VideoPlayer {
         let path = path.as_ref().to_path_buf();
         info!("Opening video via ffmpeg CLI: {:?}", path);
 
+        // 0. Check if input is a YouTube URL and resolve it
+        let path_str = path.to_string_lossy();
+        let resolved_path = if path_str.contains("youtube.com") || path_str.contains("youtu.be") {
+            info!("Detected YouTube URL, resolving stream via yt-dlp...");
+            let output = Command::new("yt-dlp")
+                .args(&["-g", "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]", &path_str])
+                .output()
+                .map_err(|e| anyhow!("Failed to run yt-dlp: {}", e))?;
+
+            if !output.status.success() {
+                return Err(anyhow!("yt-dlp failed: {}", String::from_utf8_lossy(&output.stderr)));
+            }
+            
+            let url = String::from_utf8(output.stdout)?
+                .lines()
+                .next()
+                .ok_or_else(|| anyhow!("yt-dlp returned no URL"))?
+                .to_string();
+                
+            info!("Resolved YouTube stream");
+            std::path::PathBuf::from(url)
+        } else {
+            path
+        };
+        
         // 1. Get metadata via ffprobe
         // ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration,r_frame_rate -of csv=p=0 <file>
         let output = Command::new("ffprobe")
             .args(&[
                 "-v", "error",
-                "-select_streams", "v:0",
+                "-select_streams", "v:0", // Select first video stream
                 "-show_entries", "stream=width,height,duration,r_frame_rate",
                 "-of", "csv=p=0",
-                path.to_str().unwrap()
+                resolved_path.to_str().unwrap()
             ])
             .output()
             .map_err(|e| anyhow!("Failed to run ffprobe: {}", e))?;
@@ -125,7 +152,7 @@ impl VideoPlayer {
         let stop_signal = Arc::new(Mutex::new(false));
         let stop_signal_clone = stop_signal.clone();
         
-        let path_clone = path.clone();
+        let path_clone = resolved_path.clone();
         let thread = thread::spawn(move || {
             Self::decode_loop(path_clone, width, height, fps, frame_tx, stop_signal_clone);
         });
@@ -133,6 +160,7 @@ impl VideoPlayer {
         Ok(Self {
             frame_rx,
             current_frame: None,
+            next_frame: None,
             width,
              height,
              duration,
@@ -213,11 +241,10 @@ impl VideoPlayer {
 
                 // Throttle? The pipe naturally throttles if we read slower than ffmpeg writes?
                 // Actually ffmpeg writes as fast as it can. We should throttle to avoid filling memory.
-                // Since channel is unbounded (impl above used mpsc::channel), we MUST throttle.
-                // Approximate 2x realtime speed cap?
-                // Better: check approximate queue size? We can't easily on unbounded.
-                // Let's sleep frame_duration / 2.
-                thread::sleep(Duration::from_secs_f32(frame_duration * 0.5));
+                // Since channel is bounded (sync_channel(5)), we don't need to sleep manually.
+                // The sender will block when channel is full.
+                
+                // thread::sleep(Duration::from_secs_f32(frame_duration * 0.5));
             }
 
             // Loop video
@@ -233,21 +260,42 @@ impl VideoPlayer {
             self.start_time = Some(time);
         }
 
-        let _playback_time = time - self.start_time.unwrap();
-        // Simple modulo for looping logic handled by us just matching latest frame
-        // But since we stream continuously (looping ffmpeg), our timestamps reset to 0 every loop?
-        // Actually my decode_loop resets frame_count to 0 on loop.
-        // So timestamps from decode_loop depend on current loop iteration.
-        // Wait, receiver just sees a stream of frames with timestamps 0..duration, 0..duration...
-        // So we need to match loosely.
+        let playback_time = time - self.start_time.unwrap();
         
-        // Actually, we can just grab the latest frame from the channel that is "closest" to current time?
-        // Since we are streaming, we just need to drain the channel and take the latest.
-        // The channel acts as a buffer. We drain everything available and display the last one.
-        // Since we throttle the producer, the channel shouldn't be too far ahead.
+        // 1. Check if next_frame is ready to be shown
+        if let Some(ref frame) = self.next_frame {
+            if frame.timestamp <= playback_time {
+                 // It's time! Move next to current
+                 self.current_frame = self.next_frame.take();
+            } else {
+                // Not time yet, keep showing current
+                return self.current_frame.as_ref();
+            }
+        }
         
-        while let Ok(frame) = self.frame_rx.try_recv() {
-            self.current_frame = Some(frame);
+        // 2. Consume frames from channel until we find one that is "in the future"
+        loop {
+            match self.frame_rx.try_recv() {
+                Ok(frame) => {
+                    if frame.timestamp <= playback_time {
+                        // Frame is ready (or slightly late), show immediately
+                        self.current_frame = Some(frame);
+                        // Loop to see if there's an even newer one that is also ready (skip frames if lagging)
+                    } else {
+                        // Frame is in the future! Store it and stop reading
+                        self.next_frame = Some(frame);
+                        break;
+                    }
+                },
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // No more frames available right now
+                    break;
+                },
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Decoder dead
+                    break;
+                }
+            }
         }
         
         self.current_frame.as_ref()
