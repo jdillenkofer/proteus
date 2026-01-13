@@ -110,8 +110,8 @@ impl SegmentationEngine {
         let scaled_w = (orig_w as f32 * scale).round() as u32;
         let scaled_h = (orig_h as f32 * scale).round() as u32;
         
-        // Resize preserving aspect ratio (use Nearest to avoid bilinear filtering offset)
-        let resized = image::imageops::resize(&rgb_img, scaled_w, scaled_h, FilterType::Nearest);
+        // Resize preserving aspect ratio (use Triangle for smoother edges)
+        let resized = image::imageops::resize(&rgb_img, scaled_w, scaled_h, FilterType::Triangle);
         
         // Create black canvas and paste resized image centered
         let offset_x = (MODEL_WIDTH - scaled_w) / 2;
@@ -174,8 +174,8 @@ impl SegmentationEngine {
             scaled_h,
         ).to_image();
         
-        // Resize back to original frame resolution (use Nearest to avoid bilinear offset)
-        let final_mask = image::imageops::resize(&cropped, orig_w, orig_h, FilterType::Nearest);
+        // Resize back to original frame resolution (use Gaussian for smooth alpha mask)
+        let final_mask = image::imageops::resize(&cropped, orig_w, orig_h, FilterType::Gaussian);
         
         Ok((final_mask.into_raw(), orig_w, orig_h))
     }
