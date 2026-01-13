@@ -1,6 +1,6 @@
 [package]
 name = "proteus"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 description = "Cross-platform shader webcam transformer"
 
