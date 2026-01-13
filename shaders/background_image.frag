@@ -15,28 +15,8 @@ layout(location=0) in vec2 v_tex_coords;
 layout(location=0) out vec4 f_color;
 
 void main() {
-    // Apply Gaussian blur to the mask to smooth pixelated edges
-    ivec2 mask_size = textureSize(sampler2D(t_mask, s_sampler), 0);
-    vec2 texel_size = 1.0 / vec2(mask_size);
-    
-    // 13x13 Gaussian blur with sigma ~= 4
-    float mask = 0.0;
-    float total_weight = 0.0;
-    const int radius = 6;
-    const float sigma = 4.0;
-    
-    for (int y = -radius; y <= radius; y++) {
-        for (int x = -radius; x <= radius; x++) {
-            float weight = exp(-float(x*x + y*y) / (2.0 * sigma * sigma));
-            vec2 offset = vec2(float(x), float(y)) * texel_size;
-            mask += texture(sampler2D(t_mask, s_sampler), v_tex_coords + offset).r * weight;
-            total_weight += weight;
-        }
-    }
-    mask /= total_weight;
-    
-    // Apply smoothstep for crisper transitions
-    mask = smoothstep(0.0, 1.0, mask);
+    // Sample the mask directly (smoothness is now handled by CPU-side bilinear scaling)
+    float mask = texture(sampler2D(t_mask, s_sampler), v_tex_coords).r;
     
     vec4 person_color = texture(sampler2D(t_texture, s_sampler), v_tex_coords);
     // Calculate aspect-correct UVs for the video (slot 0) using textureSize
