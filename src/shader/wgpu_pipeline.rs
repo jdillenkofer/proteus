@@ -114,6 +114,9 @@ pub struct WgpuPipeline {
     srgb_pipeline: wgpu::RenderPipeline,
     srgb_output_texture: Option<wgpu::Texture>,
     srgb_bind_group: Option<wgpu::BindGroup>,
+    
+    // Device texture dimension limit
+    max_texture_dimension: u32,
 }
 
 impl WgpuPipeline {
@@ -129,6 +132,7 @@ impl WgpuPipeline {
     ) -> Result<Self> {
         let device = &context.device;
         let queue = &context.queue;
+        let max_texture_dimension = device.limits().max_texture_dimension_2d;
 
         // Prepare shader sources and detect if any shader uses the mask binding or outputs a mask
         let mut needs_segmentation = false;
@@ -540,6 +544,7 @@ impl WgpuPipeline {
             srgb_pipeline,
             srgb_output_texture: None,
             srgb_bind_group: None,
+            max_texture_dimension,
         })
     }
 
@@ -931,7 +936,8 @@ impl WgpuPipeline {
         // Check for hot-reloads
         self.check_reload();
 
-        let rgba_input = input.to_rgba();
+        // Scale down input if it exceeds device texture limits
+        let rgba_input = input.scale_to_fit(self.max_texture_dimension);
         self.frame_count += 1;
 
         // 1. Try to send frame to ML worker (Non-blocking)
