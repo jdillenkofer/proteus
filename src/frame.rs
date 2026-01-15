@@ -67,6 +67,42 @@ impl VideoFrame {
         }
     }
 
+    /// Scale this frame down if either dimension exceeds `max_dimension`.
+    /// Preserves aspect ratio. Returns self unchanged if within limits.
+    /// Always converts to RGBA format.
+    pub fn scale_to_fit(&self, max_dimension: u32) -> VideoFrame {
+        let max_dim = self.width.max(self.height);
+        if max_dim <= max_dimension {
+            return self.to_rgba();
+        }
+
+        // Calculate new dimensions preserving aspect ratio
+        let scale = max_dimension as f32 / max_dim as f32;
+        let new_width = ((self.width as f32 * scale) as u32).max(1);
+        let new_height = ((self.height as f32 * scale) as u32).max(1);
+
+        // Convert to RGBA first
+        let rgba = self.to_rgba();
+
+        // Use image crate to resize
+        let img = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.data)
+            .expect("Failed to create image from frame data");
+        let resized = image::imageops::resize(
+            &img,
+            new_width,
+            new_height,
+            image::imageops::FilterType::Triangle,
+        );
+
+        VideoFrame {
+            width: new_width,
+            height: new_height,
+            format: PixelFormat::Rgba,
+            timestamp_us: self.timestamp_us,
+            data: resized.into_raw(),
+        }
+    }
+
     /// Converts this frame to RGBA format.
     pub fn to_rgba(&self) -> VideoFrame {
         if self.format == PixelFormat::Rgba {
