@@ -76,7 +76,10 @@ impl VideoFrame {
     pub fn scale_to_fit(&self, max_dimension: u32) -> VideoFrame {
         let max_dim = self.width.max(self.height);
         if max_dim <= max_dimension {
-            return self.to_rgba();
+            let conv_start = std::time::Instant::now();
+            let result = self.to_rgba();
+            tracing::debug!("    [Perf] scale_to_fit (no resize) to_rgba: {:?}", conv_start.elapsed());
+            return result;
         }
 
         // Calculate new dimensions preserving aspect ratio
@@ -85,17 +88,23 @@ impl VideoFrame {
         let new_height = ((self.height as f32 * scale) as u32).max(1);
 
         // Convert to RGBA first
+        let conv_start = std::time::Instant::now();
         let rgba = self.to_rgba();
+        let conv_elapsed = conv_start.elapsed();
 
         // Use image crate to resize
+        let resize_start = std::time::Instant::now();
         let img = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.data)
             .expect("Failed to create image from frame data");
         let resized = image::imageops::resize(
             &img,
             new_width,
             new_height,
-            image::imageops::FilterType::Triangle,
+            image::imageops::FilterType::Nearest,
         );
+        let resize_elapsed = resize_start.elapsed();
+
+        tracing::debug!("    [Perf] scale_to_fit (with resize) to_rgba: {:?}, resize: {:?}", conv_elapsed, resize_elapsed);
 
         VideoFrame {
             width: new_width,
@@ -117,6 +126,24 @@ impl VideoFrame {
         let pixel_count = width * height;
         let mut rgba_data = vec![0u8; pixel_count * 4];
 
+        // Fast path for RGB -> RGBA: just add alpha=255, no color conversion needed
+        if self.format == PixelFormat::Rgb {
+            for i in 0..pixel_count {
+                rgba_data[i * 4] = self.data[i * 3];
+                rgba_data[i * 4 + 1] = self.data[i * 3 + 1];
+                rgba_data[i * 4 + 2] = self.data[i * 3 + 2];
+                rgba_data[i * 4 + 3] = 255;
+            }
+            return VideoFrame {
+                width: self.width,
+                height: self.height,
+                format: PixelFormat::Rgba,
+                timestamp_us: self.timestamp_us,
+                data: rgba_data,
+            };
+        }
+
+        // Use ezk_image for YUV format conversions
         {
             let dst_color = ezk_image::ColorInfo::RGB(ezk_image::RgbColorInfo {
                 transfer: ezk_image::ColorTransfer::Linear,
@@ -131,10 +158,6 @@ impl VideoFrame {
                 dst_color,
             ).expect("Failed to wrap RGBA dst buffer");
 
-            let src_color_rgb = ezk_image::ColorInfo::RGB(ezk_image::RgbColorInfo {
-                transfer: ezk_image::ColorTransfer::Linear,
-                primaries: ezk_image::ColorPrimaries::BT709,
-            });
             let src_color_yuv = ezk_image::ColorInfo::YUV(ezk_image::YuvColorInfo {
                 transfer: ezk_image::ColorTransfer::Linear,
                 primaries: ezk_image::ColorPrimaries::BT709,
@@ -143,17 +166,6 @@ impl VideoFrame {
             });
 
             match self.format {
-                PixelFormat::Rgb => {
-                    let src_image = ezk_image::Image::from_buffer(
-                        ezk_image::PixelFormat::RGB,
-                        &self.data[..],
-                        None,
-                        width,
-                        height,
-                        src_color_rgb,
-                    ).expect("Failed to wrap RGB buffer");
-                    ezk_image::convert(&src_image, &mut dst_image).expect("Conversion failed");
-                },
                 PixelFormat::Yuyv => {
                     let src_image = ezk_image::Image::from_buffer(
                         ezk_image::PixelFormat::YUYV,
@@ -196,7 +208,7 @@ impl VideoFrame {
                     ).expect("Failed to wrap UYVY buffer");
                     ezk_image::convert(&src_image, &mut dst_image).expect("Conversion failed");
                 },
-                PixelFormat::Rgba => unreachable!(),
+                PixelFormat::Rgb | PixelFormat::Rgba => unreachable!(),
             }
         }
 
