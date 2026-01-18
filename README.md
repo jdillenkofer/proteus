@@ -205,6 +205,55 @@ Proteus will automatically resolve the stream using `streamlink` and pipe it to 
 | `--image <PATH>` | Load image into next available texture slot | - |
 | `--video <PATH>` | Load video into next available texture slot| - |
 | `--list-devices` | List available cameras | - |
+| `--config <PATH>` | Load configuration from a YAML file | - |
+
+### Configuration File
+
+You can use a YAML configuration file instead of command line arguments for easier management of complex setups (multiple shaders, textures, etc.).
+
+**`config.yaml` Example:**
+```yaml
+# Input camera device index (0, 1, 2...)
+input: 0
+
+# Resolution and framerate
+width: 1920
+height: 1080
+fps: 30
+
+# Output mode: 'window' or 'virtual-camera'
+output: window
+
+# List of shaders to apply in order
+shader:
+  - shaders/background_image.frag
+  - shaders/crt.frag
+
+# List of texture inputs (images or videos)
+# These map to t_image0, t_image1, etc. in extraction order
+textures:
+  # Load a local image
+  - type: image
+    path: assets/overlay.png
+    
+  # Load a local video
+  - type: video
+    path: assets/background_loop.mp4
+    
+  # Load a YouTube/Twitch stream
+  - type: video
+    path: https://www.youtube.com/watch?v=dQw4w9WgXcQ
+```
+
+Run with the config file:
+```bash
+cargo run --release -- --config config.yaml
+```
+
+**Hot Reloading**: The configuration file is watched for changes. You can modify shaders, textures, inputs, and resolution while the app is running!
+- **Shaders/Textures**: Updates instantly.
+- **Input/Resolution/FPS**: Re-initializes the camera and pipeline (may briefly pause).
+- **Output Mode**: Requires a restart (logged as a warning).
 
 ## License
 
