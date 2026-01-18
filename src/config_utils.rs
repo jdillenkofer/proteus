@@ -1,4 +1,4 @@
-use crate::{Config, TextureInputType};
+use crate::Config;
 use proteus::capture::{AsyncCapture, CaptureConfig};
 use proteus::shader::{ShaderSource, TextureSlot};
 use proteus::video::VideoPlayer;
@@ -134,13 +134,13 @@ pub fn load_shaders(paths: &[PathBuf]) -> Vec<ShaderSource> {
     shaders
 }
 
-/// Helper to load texture sources from ordered inputs.
-pub fn load_textures(ordered_inputs: &[(TextureInputType, PathBuf)]) -> Vec<TextureSlot> {
+/// Helper to load texture sources from TextureInput list.
+pub fn load_textures(inputs: &[crate::TextureInput]) -> Vec<TextureSlot> {
     let mut texture_sources = Vec::new();
-    for (input_type, path) in ordered_inputs {
+    for input in inputs {
         if texture_sources.len() >= 4 { break; }
-        match input_type {
-            TextureInputType::Video => {
+        match input {
+            crate::TextureInput::Video { path } => {
                 match VideoPlayer::new(path) {
                     Ok(player) => texture_sources.push(TextureSlot::Video(player)),
                     Err(e) => {
@@ -149,29 +149,12 @@ pub fn load_textures(ordered_inputs: &[(TextureInputType, PathBuf)]) -> Vec<Text
                     }
                 }
             },
-            TextureInputType::Image => {
+            crate::TextureInput::Image { path } => {
                 texture_sources.push(TextureSlot::Image(path.clone()));
             }
         }
     }
     texture_sources
-}
-
-/// Helper to load textures directly from Config textures.
-pub fn load_textures_from_config(textures: &[crate::TextureInput]) -> Vec<TextureSlot> {
-    let ordered_inputs = textures_to_ordered_inputs(textures);
-    load_textures(&ordered_inputs)
-}
-
-/// Convert Config textures to ordered inputs format.
-pub fn textures_to_ordered_inputs(textures: &[crate::TextureInput]) -> Vec<(TextureInputType, PathBuf)> {
-    textures
-        .iter()
-        .map(|t| match t {
-            crate::TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
-            crate::TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
-        })
-        .collect()
 }
 
 /// Helper to initialize camera.

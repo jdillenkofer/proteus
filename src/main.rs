@@ -1,7 +1,7 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 mod config_utils;
-use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures, load_textures_from_config, textures_to_ordered_inputs, init_capture};
+use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures, init_capture};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
@@ -147,7 +147,7 @@ struct Args {
 /// Application state for the event loop.
 struct ProteusApp {
     args: Args,
-    ordered_inputs: Vec<(TextureInputType, PathBuf)>,
+    ordered_inputs: Vec<TextureInput>,
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
     capture: Option<AsyncCapture>,
@@ -163,7 +163,7 @@ struct ProteusApp {
 }
 
 impl ProteusApp {
-    fn new(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Self {
+    fn new(args: Args, ordered_inputs: Vec<TextureInput>) -> Self {
         let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
         
         let config_watcher = ConfigWatcher::new(args.config.clone());
@@ -297,7 +297,7 @@ impl ProteusApp {
 
     fn rebuild_pipeline(&mut self, config: &Config) -> Result<()> {
        let shaders = load_shaders(&config.shader);
-       let texture_sources = load_textures_from_config(&config.textures);
+       let texture_sources = load_textures(&config.textures);
        
        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("No GPU context"))?;
        let pipeline = WgpuPipeline::new(context, self.args.width, self.args.height, shaders, texture_sources)?;
@@ -451,7 +451,7 @@ fn main() -> Result<()> {
 }
 
 /// Load configuration from a YAML file and convert to Args.
-fn load_config(path: &PathBuf) -> Result<(Args, Vec<(TextureInputType, PathBuf)>)> {
+fn load_config(path: &PathBuf) -> Result<(Args, Vec<TextureInput>)> {
     let content = fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read config file {:?}: {}", path, e))?;
     
@@ -459,9 +459,6 @@ fn load_config(path: &PathBuf) -> Result<(Args, Vec<(TextureInputType, PathBuf)>
         .map_err(|e| anyhow::anyhow!("Failed to parse config file {:?}: {}", path, e))?;
     
     info!("Loaded configuration from {:?}", path);
-    
-    // Convert textures to ordered inputs
-    let ordered_inputs = textures_to_ordered_inputs(&config.textures);
     
     // Convert Config to Args
     let args = Args {
@@ -479,19 +476,19 @@ fn load_config(path: &PathBuf) -> Result<(Args, Vec<(TextureInputType, PathBuf)>
         video: Vec::new(), // Not used when loading from config
     };
     
-    Ok((args, ordered_inputs))
+    Ok((args, config.textures))
 }
 
 /// Build ordered texture inputs from CLI arguments.
-fn build_ordered_inputs_from_cli(args: &Args) -> Vec<(TextureInputType, PathBuf)> {
+fn build_ordered_inputs_from_cli(args: &Args) -> Vec<TextureInput> {
     let matches = Args::command().get_matches();
-    let mut ordered_inputs: Vec<(usize, TextureInputType, PathBuf)> = Vec::new();
+    let mut ordered_inputs: Vec<(usize, TextureInput)> = Vec::new();
 
     if let Some(indices) = matches.indices_of("video") {
         let paths: Vec<&PathBuf> = args.video.iter().collect();
         for (i, idx) in indices.enumerate() {
             if i < paths.len() {
-                ordered_inputs.push((idx, TextureInputType::Video, paths[i].clone()));
+                ordered_inputs.push((idx, TextureInput::Video { path: paths[i].clone() }));
             }
         }
     }
@@ -500,17 +497,17 @@ fn build_ordered_inputs_from_cli(args: &Args) -> Vec<(TextureInputType, PathBuf)
         let paths: Vec<&PathBuf> = args.image.iter().collect();
         for (i, idx) in indices.enumerate() {
             if i < paths.len() {
-                ordered_inputs.push((idx, TextureInputType::Image, paths[i].clone()));
+                ordered_inputs.push((idx, TextureInput::Image { path: paths[i].clone() }));
             }
         }
     }
 
     ordered_inputs.sort_by_key(|k| k.0);
-    ordered_inputs.into_iter().map(|(_, t, p)| (t, p)).collect()
+    ordered_inputs.into_iter().map(|(_, t)| t).collect()
 }
 
 /// Run in window output mode (default).
-fn run_window_mode(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Result<()> {
+fn run_window_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Result<()> {
     let mut app = ProteusApp::new(args, ordered_inputs);
 
     // Create event loop
@@ -523,15 +520,9 @@ fn run_window_mode(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>)
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-enum TextureInputType {
-    Video,
-    Image,
-}
-
 /// Run in virtual camera output mode.
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Result<()> {
+fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
@@ -603,7 +594,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
                     if diff.needs_pipeline_reload() {
                         info!("Reloading pipeline due to shader/texture changes...");
                         let new_shaders = load_shaders(&new_config.shader);
-                        let new_texture_sources = load_textures_from_config(&new_config.textures);
+                        let new_texture_sources = load_textures(&new_config.textures);
                        
                         match WgpuPipeline::new(context.clone(), args.width, args.height, new_shaders, new_texture_sources) {
                            Ok(new_pipeline) => {
