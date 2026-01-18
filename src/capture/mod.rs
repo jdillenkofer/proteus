@@ -106,8 +106,11 @@ impl AsyncCapture {
             
             info!("Camera capture thread started");
             while running_clone.load(Ordering::Relaxed) {
+                let capture_start = std::time::Instant::now();
                 match capture.capture_frame() {
                     Ok(frame) => {
+                        let capture_elapsed = capture_start.elapsed();
+                        debug!("[Perf] Camera capture_frame: {:?}", capture_elapsed);
                         // Use try_send to drop frames if the receiver is slow
                         match frame_tx.try_send(frame) {
                             Ok(_) => {},

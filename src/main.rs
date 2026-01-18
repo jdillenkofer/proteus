@@ -768,12 +768,17 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
         if let Some(frame) = frame_option {
             // Process through shader
             let time = start_time.elapsed().as_secs_f32();
+            let shader_start = Instant::now();
             match pipeline.process_frame(frame, time) {
                 Ok(processed) => {
+                    let shader_elapsed = shader_start.elapsed();
                     // Write to virtual camera
+                    let write_start = Instant::now();
                     if let Err(e) = output.write_frame(&processed) {
                         error!("Output error: {}", e);
                     }
+                    let write_elapsed = write_start.elapsed();
+                    debug!("[Perf] Virtual Camera - Shader: {:?}, Write: {:?}", shader_elapsed, write_elapsed);
                 }
                 Err(e) => {
                     error!("Shader processing error: {}", e);

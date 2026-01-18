@@ -216,7 +216,9 @@ impl VirtualCameraOutput {
     /// Write a frame to the shared memory queue.
     fn write_frame_internal(&mut self, frame: &VideoFrame) -> Result<()> {
         // Convert to NV12
+        let nv12_start = std::time::Instant::now();
         let nv12 = frame.to_nv12();
+        let nv12_elapsed = nv12_start.elapsed();
 
         // Get current write index and advance
         let header = unsafe { &*self.header };
@@ -237,6 +239,7 @@ impl VirtualCameraOutput {
             *self.timestamps[idx] = timestamp;
         }
 
+        let copy_start = std::time::Instant::now();
         // Copy Y plane
         unsafe {
             ptr::copy_nonoverlapping(nv12.data.as_ptr(), self.frames[idx], y_size);
@@ -250,6 +253,9 @@ impl VirtualCameraOutput {
                 uv_size,
             );
         }
+        let copy_elapsed = copy_start.elapsed();
+
+        debug!("  [Perf] VCam Write - NV12 conv: {:?}, SharedMem copy: {:?}", nv12_elapsed, copy_elapsed);
 
         // Update read index and state
         header.read_idx.store(inc, Ordering::SeqCst);

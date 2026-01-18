@@ -541,9 +541,12 @@ impl VirtualCameraOutput {
     /// Write a frame to the virtual camera.
     fn write_frame_internal(&mut self, frame: &VideoFrame) -> Result<()> {
         // Convert frame to UYVY
+        let uyvy_start = std::time::Instant::now();
         let uyvy = frame.to_uyvy();
+        let uyvy_elapsed = uyvy_start.elapsed();
 
         // Create pixel buffer from pool
+        let buffer_start = std::time::Instant::now();
         let mut pixel_buffer: CVPixelBufferRef = ptr::null_mut();
         let result = unsafe {
             CVPixelBufferPoolCreatePixelBuffer(
@@ -556,8 +559,10 @@ impl VirtualCameraOutput {
         if result != K_CV_RETURN_SUCCESS || pixel_buffer.is_null() {
             return Err(anyhow!("Failed to create pixel buffer (error {})", result));
         }
+        let buffer_elapsed = buffer_start.elapsed();
 
         // Lock buffer and copy data
+        let copy_start = std::time::Instant::now();
         unsafe {
             CVPixelBufferLockBaseAddress(pixel_buffer, 0);
             
@@ -570,6 +575,7 @@ impl VirtualCameraOutput {
 
             CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
         }
+        let copy_elapsed = copy_start.elapsed();
 
         // Create sample buffer with timing
         // Use high-resolution clock for timestamp (nanoseconds)
@@ -614,7 +620,9 @@ impl VirtualCameraOutput {
         }
 
         // Enqueue the sample buffer
+        let enqueue_start = std::time::Instant::now();
         let result = unsafe { CMSimpleQueueEnqueue(self.queue, sample_buffer) };
+        let enqueue_elapsed = enqueue_start.elapsed();
 
         // Release pixel buffer (sample buffer retains it)
         unsafe { CVPixelBufferRelease(pixel_buffer) };
@@ -622,6 +630,9 @@ impl VirtualCameraOutput {
         if result != 0 {
             return Err(anyhow!("Failed to enqueue sample buffer (error {})", result));
         }
+
+        debug!("  [Perf] VCam Write - UYVY conv: {:?}, Buffer alloc: {:?}, Copy: {:?}, Enqueue: {:?}", 
+               uyvy_elapsed, buffer_elapsed, copy_elapsed, enqueue_elapsed);
 
         Ok(())
     }

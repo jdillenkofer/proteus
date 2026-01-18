@@ -945,7 +945,10 @@ impl WgpuPipeline {
         self.check_reload();
 
         // Scale down input if it exceeds device texture limits
+        let scale_start = std::time::Instant::now();
         let rgba_input = input.scale_to_fit(self.max_texture_dimension);
+        let scale_elapsed = scale_start.elapsed();
+        tracing::debug!("  [Perf] Input scale_to_fit (RGBA conv): {:?}", scale_elapsed);
         self.frame_count += 1;
 
         // 1. Try to send frame to ML worker (Non-blocking)

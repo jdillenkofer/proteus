@@ -168,9 +168,12 @@ impl VirtualCameraOutput {
     fn write_frame_internal(&mut self, frame: &VideoFrame) -> Result<()> {
         // v4l2loopback typically accepts raw pixel data
         // Convert to YUYV (most standard webcam format)
+        let yuyv_start = std::time::Instant::now();
         let yuyv = frame.to_yuyv();
+        let yuyv_elapsed = yuyv_start.elapsed();
 
         // Write the raw YUYV data to the device
+        let write_start = std::time::Instant::now();
         self.device.write_all(&yuyv.data).map_err(|e| {
             // Non-blocking write might fail if buffer is full, that's OK
             if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -179,6 +182,9 @@ impl VirtualCameraOutput {
             }
             anyhow!("Failed to write to v4l2loopback: {}", e)
         })?;
+        let write_elapsed = write_start.elapsed();
+
+        debug!("  [Perf] VCam Write - YUYV conv: {:?}, Device write: {:?}", yuyv_elapsed, write_elapsed);
 
         Ok(())
     }
