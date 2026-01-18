@@ -1,7 +1,7 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 mod config_utils;
-use config_utils::{ConfigWatcher, load_shaders, load_textures, init_capture};
+use config_utils::{ConfigWatcher, load_shaders, load_textures, load_textures_from_config, textures_to_ordered_inputs, init_capture};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
@@ -278,98 +278,33 @@ impl ProteusApp {
 
     fn handle_config_change(&mut self, old_config_opt: Option<Config>, new_config: Config) {
         if let Some(old_config) = old_config_opt {
-            let mut recreate_pipeline = false;
-
-            // 1. Output Change (Unavailable)
-            if new_config.output != old_config.output {
-                tracing::warn!("Changing output mode requires a restart.");
-            }
-
-            // 2. Capture/Window Change (Input, Width, Height, FPS)
-            if new_config.input != old_config.input ||
+            // Only shader and texture changes are hot-reloadable
+            // All other changes require a restart
+            if new_config.output != old_config.output ||
+               new_config.input != old_config.input ||
                new_config.width != old_config.width ||
                new_config.height != old_config.height ||
+               new_config.max_input_width != old_config.max_input_width ||
+               new_config.max_input_height != old_config.max_input_height ||
                new_config.fps != old_config.fps {
-                
-                info!("Config change detected: Re-initializing capture...");
-
-                // Update FPS/Duration
-                self.args.fps = new_config.fps;
-                self.frame_duration = Duration::from_secs_f64(1.0 / new_config.fps as f64);
-                
-                // Update dimensions
-                self.args.width = new_config.width;
-                self.args.height = new_config.height;
-                self.args.input = new_config.input.clone();
-
-                // Re-initialize capture
-                let capture_config = CaptureConfig {
-                    device_id: new_config.input.clone(),
-                    width: new_config.width,
-                    height: new_config.height,
-                    max_input_width: new_config.max_input_width.unwrap_or(new_config.width),
-                    max_input_height: new_config.max_input_height.unwrap_or(new_config.height),
-                    fps: new_config.fps,
-                };
-
-                // Drop old capture first
-                self.capture = None;
-                
-                if let Some(capture) = init_capture(capture_config) {
-                     self.capture = Some(capture);
-                     info!("Capture re-initialized (Device: {}, {}x{} @ {}fps)", 
-                           new_config.input, new_config.width, new_config.height, new_config.fps);
-                } else {
-                     error!("Failed to re-initialize capture");
-                }
-
-                // Resize Window if needed
-                if new_config.width != old_config.width || new_config.height != old_config.height {
-                    if let Some(window) = &self.window {
-                        let size = PhysicalSize::new(new_config.width, new_config.height);
-                        let _ = window.request_inner_size(size);
-                    }
-                    recreate_pipeline = true; // Pipeline depends on resolution
-                }
+                tracing::warn!("Changes to output, input, width, height, max_input_width, max_input_height, or fps require a restart.");
             }
 
-            // 3. Shader/Texture Change
+            // Hot-reload shader/texture changes
             if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
-                recreate_pipeline = true;
-            }
-
-            if recreate_pipeline {
-                info!("Reloading pipeline due to config changes...");
+                info!("Reloading pipeline due to shader/texture changes...");
                 if let Err(e) = self.rebuild_pipeline(&new_config) {
                      error!("Failed to rebuild pipeline: {}", e);
                 } else {
                      info!("Pipeline reloaded successfully");
                 }
             }
-        } else {
-             // Should not happen if initialized correctly
-             // self.current_config = Some(new_config.clone());
         }
-        // self.current_config = Some(new_config);
     }
 
     fn rebuild_pipeline(&mut self, config: &Config) -> Result<()> {
-       // Load shaders
        let shaders = load_shaders(&config.shader);
-       
-       // Load textures - need to convert config textures to ordered inputs format temporarily or 
-       // just update load_textures to handle simple iterator?
-       // Actually load_textures takes `&[(TextureInputType, PathBuf)]`.
-       // We should construct that vector here.
-       let ordered_inputs: Vec<(TextureInputType, PathBuf)> = config.textures
-           .iter()
-           .map(|t| match t {
-               TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
-               TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
-           })
-           .collect();
-           
-       let texture_sources = load_textures(&ordered_inputs);
+       let texture_sources = load_textures_from_config(&config.textures);
        
        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("No GPU context"))?;
        let pipeline = WgpuPipeline::new(context, self.args.width, self.args.height, shaders, texture_sources)?;
@@ -533,13 +468,7 @@ fn load_config(path: &PathBuf) -> Result<(Args, Vec<(TextureInputType, PathBuf)>
     info!("Loaded configuration from {:?}", path);
     
     // Convert textures to ordered inputs
-    let ordered_inputs: Vec<(TextureInputType, PathBuf)> = config.textures
-        .iter()
-        .map(|t| match t {
-            TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
-            TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
-        })
-        .collect();
+    let ordered_inputs = textures_to_ordered_inputs(&config.textures);
     
     // Convert Config to Args
     let args = Args {
@@ -660,7 +589,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
     let mut output = VirtualCameraOutput::new(vc_config)?;
     info!("Virtual camera output initialized");
 
-    let mut frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
+    let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
     let start_time = Instant::now();
     let mut frame_count = 0u32;
     let mut fps_last_time = Instant::now();
@@ -672,99 +601,31 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
         if let Some(watcher) = &mut config_watcher {
             if let Some((old_config_opt, new_config)) = watcher.check_for_changes() {
                  if let Some(old_config) = old_config_opt {
-                     let mut recreate_pipeline = false;
-                     
-                     if new_config.output != old_config.output {
-                         tracing::warn!("Changing output mode requires a restart.");
+                     // Only shader and texture changes are hot-reloadable
+                     // All other changes require a restart
+                     if new_config.output != old_config.output ||
+                        new_config.input != old_config.input ||
+                        new_config.width != old_config.width ||
+                        new_config.height != old_config.height ||
+                        new_config.max_input_width != old_config.max_input_width ||
+                        new_config.max_input_height != old_config.max_input_height ||
+                        new_config.fps != old_config.fps {
+                         tracing::warn!("Changes to output, input, width, height, max_input_width, max_input_height, or fps require a restart.");
                      }
 
-                     // Check for re-initialization fields
-                    if new_config.input != old_config.input ||
-                       new_config.width != old_config.width ||
-                       new_config.height != old_config.height ||
-                       new_config.fps != old_config.fps {
-                        
-                        info!("Config change detected: Re-initializing capture and output...");
-
-                        // Update Loop timing
-                        frame_duration = Duration::from_secs_f64(1.0 / new_config.fps as f64);
-                        
-                        // Re-initialize capture
-                        let capture_config = CaptureConfig {
-                            device_id: new_config.input.clone(),
-                            width: new_config.width,
-                            height: new_config.height,
-                            max_input_width: new_config.max_input_width.unwrap_or(new_config.width),
-                            max_input_height: new_config.max_input_height.unwrap_or(new_config.height),
-                            fps: new_config.fps,
-                        };
-                        
-                        // Drop old capture first
-                        capture = None;
-                        
-                        if let Some(new_capture) = init_capture(capture_config) {
-                             capture = Some(new_capture);
-                             info!("Capture re-initialized (Device: {}, {}x{} @ {}fps)", 
-                                   new_config.input, new_config.width, new_config.height, new_config.fps);
-                        } else {
-                             error!("Failed to re-initialize capture");
-                        }
-
-                        // Re-initialize Virtual Camera Output
-                        // Must drop old output first to release the global lock!
-                        drop(output);
-                        
-                        let vc_config = VirtualCameraConfig {
-                            width: new_config.width,
-                            height: new_config.height,
-                            fps: new_config.fps,
-                            ..Default::default()
-                        };
-                        
-                        match VirtualCameraOutput::new(vc_config) {
-                            Ok(new_output) => output = new_output,
-                            Err(e) => {
-                                error!("Failed to re-initialize virtual camera output: {}", e);
-                                // If we failed, we have no output. We should probably crash or retry?
-                                // For now, we'll crash on next write, or... wait.
-                                // We can't easily recover here without complex logic.
-                                // Ideally we should keep the old one if new fails, but we dropped it.
-                                // Given the lock requirement, we had to drop it.
-                                return Err(anyhow::anyhow!("Critical error: Failed to re-init output: {}", e));
-                            },
-                        }
-                        
-                        recreate_pipeline = true; // Pipeline depends on resolution
-                    }
-
-                    // Check for hot-reloadable changes
+                    // Hot-reload shader/texture changes
                     if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
-                        recreate_pipeline = true;
-                    }
-
-                    if recreate_pipeline {
-                        info!("Reloading pipeline due to config changes...");
-                        
-                        // Load shaders
+                        info!("Reloading pipeline due to shader/texture changes...");
                         let new_shaders = load_shaders(&new_config.shader);
+                        let new_texture_sources = load_textures_from_config(&new_config.textures);
                        
-                       // Load textures
-                       let ordered_inputs: Vec<(TextureInputType, PathBuf)> = new_config.textures
-                           .iter()
-                           .map(|t| match t {
-                               TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
-                               TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
-                           })
-                           .collect();
-                       let new_texture_sources = load_textures(&ordered_inputs);
-                       
-                       match WgpuPipeline::new(context.clone(), new_config.width, new_config.height, new_shaders, new_texture_sources) {
+                        match WgpuPipeline::new(context.clone(), args.width, args.height, new_shaders, new_texture_sources) {
                            Ok(new_pipeline) => {
                                pipeline = new_pipeline;
                                info!("Pipeline reloaded successfully");
                            }
                            Err(e) => error!("Failed to rebuild pipeline: {}", e),
-                       }
+                        }
                     }
                  }
             }

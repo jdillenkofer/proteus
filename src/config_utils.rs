@@ -120,6 +120,23 @@ pub fn load_textures(ordered_inputs: &[(TextureInputType, PathBuf)]) -> Vec<Text
     texture_sources
 }
 
+/// Helper to load textures directly from Config textures.
+pub fn load_textures_from_config(textures: &[crate::TextureInput]) -> Vec<TextureSlot> {
+    let ordered_inputs = textures_to_ordered_inputs(textures);
+    load_textures(&ordered_inputs)
+}
+
+/// Convert Config textures to ordered inputs format.
+pub fn textures_to_ordered_inputs(textures: &[crate::TextureInput]) -> Vec<(TextureInputType, PathBuf)> {
+    textures
+        .iter()
+        .map(|t| match t {
+            crate::TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
+            crate::TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
+        })
+        .collect()
+}
+
 /// Helper to initialize camera.
 pub fn init_capture(config: CaptureConfig) -> Option<AsyncCapture> {
     match AsyncCapture::new(config) {

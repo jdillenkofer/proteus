@@ -257,10 +257,9 @@ Run with the config file:
 cargo run --release -- --config config.yaml
 ```
 
-**Hot Reloading**: The configuration file is watched for changes. You can modify shaders, textures, inputs, and resolution while the app is running!
-- **Shaders/Textures**: Updates instantly.
-- **Input/Resolution/FPS**: Re-initializes the camera and pipeline (may briefly pause).
-- **Output Mode**: Requires a restart (logged as a warning).
+**Hot Reloading**: The configuration file is watched for changes.
+- **Shaders/Textures**: Hot-reloadable — updates instantly without restart.
+- **Other settings** (input, width, height, max_input_width, max_input_height, fps, output): Require a restart (logged as a warning).
 
 ## License
 
