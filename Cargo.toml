@@ -29,6 +29,7 @@ image = "0.25"
 ndarray = "0.15"
 notify = "8.2.0"
 url = "2.5.8"
+ezk-image = "0.3.0"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
