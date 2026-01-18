@@ -1,7 +1,9 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 mod config_utils;
+mod utils;
 use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures, init_capture};
+use utils::FpsCounter;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
@@ -217,8 +219,7 @@ struct ProteusApp {
     last_frame_time: Instant,
     frame_duration: Duration,
     start_time: Instant,
-    frame_count: u32,
-    fps_last_time: Instant,
+    fps_counter: FpsCounter,
     // Config hot-reloading
     config_watcher: Option<ConfigWatcher>,
 }
@@ -239,8 +240,7 @@ impl ProteusApp {
             last_frame_time: Instant::now(),
             frame_duration,
             start_time: Instant::now(),
-            frame_count: 0,
-            fps_last_time: Instant::now(),
+            fps_counter: FpsCounter::new(),
             config_watcher,
         }
     }
@@ -294,13 +294,8 @@ impl ProteusApp {
             return;
         };
 
-        self.frame_count += 1;
-        let elapsed = self.fps_last_time.elapsed();
-        if elapsed >= Duration::from_secs(1) {
-            let fps = self.frame_count as f32 / elapsed.as_secs_f32();
+        if let Some(fps) = self.fps_counter.update() {
             debug!("[Perf] Rendering at {:.2} FPS (Resolution: {}x{})", fps, self.config.width, self.config.height);
-            self.frame_count = 0;
-            self.fps_last_time = Instant::now();
         }
 
         // Get latest frame (non-blocking)
@@ -574,8 +569,7 @@ fn run_virtual_camera_mode(config: Config) -> Result<()> {
 
     let frame_duration = Duration::from_secs_f64(1.0 / config.fps as f64);
     let start_time = Instant::now();
-    let mut frame_count = 0u32;
-    let mut fps_last_time = Instant::now();
+    let mut fps_counter = FpsCounter::new();
     info!("Starting virtual camera stream at {} fps", config.fps);
 
     // Main loop
@@ -610,13 +604,8 @@ fn run_virtual_camera_mode(config: Config) -> Result<()> {
         let frame_start = Instant::now();
 
         // FPS counter
-        frame_count += 1;
-        let elapsed_fps = fps_last_time.elapsed();
-        if elapsed_fps >= Duration::from_secs(1) {
-            let fps = frame_count as f32 / elapsed_fps.as_secs_f32();
+        if let Some(fps) = fps_counter.update() {
             info!("Virtual camera: {:.2} FPS", fps);
-            frame_count = 0;
-            fps_last_time = Instant::now();
         }
 
         // Get latest frame (non-blocking)
