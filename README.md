@@ -152,6 +152,22 @@ cargo run --release -- --video "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 Proteus will automatically resolve the stream using `yt-dlp` and pipe it to `ffmpeg`.
 
+### Twitch Support
+
+Proteus supports playing Twitch streams directly by providing the URL as a video input.
+
+**Requirements**:
+- `streamlink` must be installed and available in your system PATH.
+  - **macOS**: `brew install streamlink`
+  - **Linux**: `pip install streamlink` or via your package manager
+  - **Windows**: Download from [streamlink.github.io](https://streamlink.github.io/)
+
+**Example**:
+```bash
+cargo run --release -- --video "https://www.twitch.tv/shroud"
+```
+Proteus will automatically resolve the stream using `streamlink` and pipe it to `ffmpeg`.
+
 ## Configuration Options
 
 | Option | Description | Default |

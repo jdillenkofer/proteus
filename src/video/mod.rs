@@ -10,6 +10,28 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tracing::{error, info, warn};
+use url::Url;
+
+/// Supported streaming platforms
+enum StreamingPlatform {
+    YouTube,
+    Twitch,
+}
+
+/// Check if a URL belongs to a known streaming platform by parsing the domain.
+fn detect_streaming_platform(input: &str) -> Option<StreamingPlatform> {
+    let parsed = Url::parse(input).ok()?;
+    let host = parsed.host_str()?;
+    
+    // Strip "www." prefix if present for comparison
+    let domain = host.strip_prefix("www.").unwrap_or(host);
+    
+    match domain {
+        "youtube.com" | "youtu.be" => Some(StreamingPlatform::YouTube),
+        "twitch.tv" => Some(StreamingPlatform::Twitch),
+        _ => None,
+    }
+}
 
 /// A video player that decodes frames using a background ffmpeg process.
 pub struct VideoPlayer {
@@ -49,29 +71,51 @@ impl VideoPlayer {
         let path = path.as_ref().to_path_buf();
         info!("Opening video via ffmpeg CLI: {:?}", path);
 
-        // 0. Check if input is a YouTube URL and resolve it
+        // 0. Check if input is a streaming URL and resolve it
         let path_str = path.to_string_lossy();
-        let resolved_path = if path_str.contains("youtube.com") || path_str.contains("youtu.be") {
-            info!("Detected YouTube URL, resolving stream via yt-dlp...");
-            let output = Command::new("yt-dlp")
-                .args(&["-g", "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]", &path_str])
-                .output()
-                .map_err(|e| anyhow!("Failed to run yt-dlp: {}", e))?;
+        let resolved_path = match detect_streaming_platform(&path_str) {
+            Some(StreamingPlatform::YouTube) => {
+                info!("Detected YouTube URL, resolving stream via yt-dlp...");
+                let output = Command::new("yt-dlp")
+                    .args(&["-g", "-f", "bestvideo[height<=1080][vcodec^=avc1]/bestvideo[height<=1080]/best", &path_str])
+                    .output()
+                    .map_err(|e| anyhow!("Failed to run yt-dlp: {}", e))?;
 
-            if !output.status.success() {
-                return Err(anyhow!("yt-dlp failed: {}", String::from_utf8_lossy(&output.stderr)));
-            }
-            
-            let url = String::from_utf8(output.stdout)?
-                .lines()
-                .next()
-                .ok_or_else(|| anyhow!("yt-dlp returned no URL"))?
-                .to_string();
+                if !output.status.success() {
+                    return Err(anyhow!("yt-dlp failed: {}", String::from_utf8_lossy(&output.stderr)));
+                }
                 
-            info!("Resolved YouTube stream");
-            std::path::PathBuf::from(url)
-        } else {
-            path
+                let url = String::from_utf8(output.stdout)?
+                    .lines()
+                    .next()
+                    .ok_or_else(|| anyhow!("yt-dlp returned no URL"))?
+                    .to_string();
+                    
+                info!("Resolved YouTube stream");
+                std::path::PathBuf::from(url)
+            }
+            Some(StreamingPlatform::Twitch) => {
+                info!("Detected Twitch URL, resolving stream via streamlink...");
+                let output = Command::new("streamlink")
+                    .args(&["--stream-url", &path_str, "best"])
+                    .output()
+                    .map_err(|e| anyhow!("Failed to run streamlink: {}", e))?;
+
+                if !output.status.success() {
+                    return Err(anyhow!("streamlink failed: {}", String::from_utf8_lossy(&output.stderr)));
+                }
+                
+                let url = String::from_utf8(output.stdout)?
+                    .lines()
+                    .next()
+                    .ok_or_else(|| anyhow!("streamlink returned no URL"))?
+                    .trim()
+                    .to_string();
+                    
+                info!("Resolved Twitch stream");
+                std::path::PathBuf::from(url)
+            }
+            None => path,
         };
         
         // 1. Get metadata via ffprobe
@@ -191,7 +235,7 @@ impl VideoPlayer {
                     "-"
                 ])
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null()) // Change to piped if debugging needed
+                .stderr(Stdio::piped()) // Enable stderr to see ffmpeg errors
                 .spawn() 
             {
                 Ok(c) => c,
@@ -201,6 +245,26 @@ impl VideoPlayer {
                     continue;
                 }
             };
+
+            // Spawn a thread to log ffmpeg stderr
+            let mut stderr = child.stderr.take().unwrap();
+            thread::spawn(move || {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stderr.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let msg = String::from_utf8_lossy(&buf[..n]);
+                            for line in msg.lines() {
+                                if line.contains("Error") || line.contains("error") || line.contains("failed") {
+                                    error!("ffmpeg: {}", line);
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
 
             let mut stdout = child.stdout.take().unwrap();
             let mut buffer = vec![0u8; frame_size];
