@@ -1156,13 +1156,13 @@ impl ShaderPipeline for WgpuPipeline {
             wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
         );
 
-        self.context.queue.submit(std::iter::once(encoder.finish()));
+        let submission_index = self.context.queue.submit(std::iter::once(encoder.finish()));
 
         let readback_start = std::time::Instant::now();
         let buffer_slice = self.readback_buffer.as_ref().unwrap().slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| sender.send(result).unwrap());
-        self.context.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        self.context.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index), timeout: None }).unwrap();
         receiver.recv()??;
 
         let data = buffer_slice.get_mapped_range();
