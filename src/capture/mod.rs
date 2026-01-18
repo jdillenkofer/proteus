@@ -42,8 +42,8 @@ pub struct CameraInfo {
 /// Configuration for camera capture.
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
-    /// Camera device index
-    pub device_index: u32,
+    /// Camera device ID (index or name)
+    pub device_id: String,
     /// Desired frame width
     pub width: u32,
     /// Desired frame height
@@ -55,7 +55,7 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            device_index: 0,
+            device_id: "0".to_string(),
             width: 1920,
             height: 1080,
             fps: 30,

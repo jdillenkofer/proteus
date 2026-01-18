@@ -49,8 +49,8 @@ pub enum TextureInput {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    /// Camera device index
-    pub input: u32,
+    /// Camera device ID (index or name)
+    pub input: String,
     /// Path to GLSL fragment shader file(s)
     pub shader: Vec<PathBuf>,
     /// Frame width
@@ -68,7 +68,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            input: 0,
+            input: "0".to_string(),
             shader: Vec::new(),
             width: 1920,
             height: 1080,
@@ -93,9 +93,9 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Camera device index
+    /// Camera device ID (index or name)
     #[arg(short, long, default_value = "0")]
-    input: u32,
+    input: String,
 
     /// Path to GLSL fragment shader file(s)
     #[arg(short, long, num_args = 1..)]
@@ -174,7 +174,7 @@ impl ProteusApp {
     fn initialize(&mut self) -> Result<()> {
         // Initialize camera capture
         let config = CaptureConfig {
-            device_index: self.args.input,
+            device_id: self.args.input.clone(),
             width: self.args.width,
             height: self.args.height,
             fps: self.args.fps,
@@ -284,11 +284,11 @@ impl ProteusApp {
                 // Update dimensions
                 self.args.width = new_config.width;
                 self.args.height = new_config.height;
-                self.args.input = new_config.input;
+                self.args.input = new_config.input.clone();
 
                 // Re-initialize capture
                 let capture_config = CaptureConfig {
-                    device_index: new_config.input,
+                    device_id: new_config.input.clone(),
                     width: new_config.width,
                     height: new_config.height,
                     fps: new_config.fps,
@@ -603,7 +603,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
 
     // Initialize camera capture (async for better performance)
     let config = CaptureConfig {
-        device_index: args.input,
+        device_id: args.input.clone(),
         width: args.width,
         height: args.height,
         fps: args.fps,
@@ -669,7 +669,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
                         
                         // Re-initialize capture
                         let capture_config = CaptureConfig {
-                            device_index: new_config.input,
+                            device_id: new_config.input.clone(),
                             width: new_config.width,
                             height: new_config.height,
                             fps: new_config.fps,

@@ -75,10 +75,22 @@ impl CaptureBackend for NokhwaCapture {
         let mut camera = None;
         let mut active_format = None;
         
+        // Resolve device index from config.device_id (index or name)
+        let target_index = if let Ok(idx) = config.device_id.parse::<u32>() {
+            CameraIndex::Index(idx)
+        } else {
+            let devices = nokhwa::query(nokhwa::utils::ApiBackend::Auto)?;
+            devices.into_iter()
+                .find(|d| d.human_name() == config.device_id)
+                .ok_or_else(|| anyhow::anyhow!("Camera not found: {}", config.device_id))?
+                .index()
+                .clone()
+        };
+
         // Try to brute-force open the camera with known standard formats
         for seed in seed_formats {
             let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(seed));
-            let idx = CameraIndex::Index(config.device_index);
+            let idx = target_index.clone();
             
             // Try to create the camera instance
             if let Ok(mut cam) = Camera::new(idx, requested) {
@@ -93,7 +105,7 @@ impl CaptureBackend for NokhwaCapture {
             }
         }
         
-        let mut camera = camera.ok_or_else(|| anyhow::anyhow!("Could not connect to and open stream on camera index {} with any standard format.", config.device_index))?;
+        let mut camera = camera.ok_or_else(|| anyhow::anyhow!("Could not connect to and open stream on camera '{}' with any standard format.", config.device_id))?;
 
         // 2. Query supported formats to see if we can upgrade to the user's actual request
         // Sometimes this returns empty, in which case we just stick with the working seed.

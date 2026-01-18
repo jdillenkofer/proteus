@@ -196,7 +196,7 @@ Proteus will automatically resolve the stream using `streamlink` and pipe it to 
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-i, --input <INDEX>` | Camera device index | 0 |
+| `-i, --input <ID>` | Camera device index (number) or name (string) | 0 |
 | `-s, --shader <PATH>` | Path to GLSL fragment shader | None (Passthrough) |
 | `--width <PIXELS>` | Frame width | 1920 |
 | `--height <PIXELS>` | Frame height | 1080 |
@@ -213,8 +213,8 @@ You can use a YAML configuration file instead of command line arguments for easi
 
 **`config.yaml` Example:**
 ```yaml
-# Input camera device index (0, 1, 2...)
-input: 0
+# Input camera device: Use index (0) or strict name ("FaceTime HD Camera")
+input: "0"
 
 # Resolution and framerate
 width: 1920
