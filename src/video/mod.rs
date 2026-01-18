@@ -225,15 +225,35 @@ impl VideoPlayer {
             if *stop_signal.lock().unwrap() { return; }
 
             info!("Starting ffmpeg process");
+            
+            // Build ffmpeg arguments - add network buffering for streaming sources
+            let path_str = path.to_str().unwrap();
+            let is_network_source = path_str.starts_with("http://") || path_str.starts_with("https://");
+            
+            let mut args: Vec<&str> = Vec::new();
+            
+            // Add network buffering options for streaming sources
+            if is_network_source {
+                args.extend_from_slice(&[
+                    "-reconnect", "1",
+                    "-reconnect_streamed", "1", 
+                    "-reconnect_delay_max", "5",
+                    "-thread_queue_size", "512",
+                ]);
+            }
+            
+            // Input and output format
+            args.extend_from_slice(&[
+                "-i", path_str,
+                "-f", "image2pipe",
+                "-pix_fmt", "rgba",
+                "-vcodec", "rawvideo",
+                "-"
+            ]);
+            
             // ffmpeg -i <file> -f image2pipe -pix_fmt rgba -vcodec rawvideo -
             let mut child = match Command::new("ffmpeg")
-                .args(&[
-                    "-i", path.to_str().unwrap(),
-                    "-f", "image2pipe",
-                    "-pix_fmt", "rgba",
-                    "-vcodec", "rawvideo",
-                    "-"
-                ])
+                .args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()) // Enable stderr to see ffmpeg errors
                 .spawn() 
