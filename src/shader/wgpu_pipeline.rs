@@ -681,12 +681,20 @@ impl WgpuPipeline {
 
     /// Update or create cached textures/buffers if dimensions changed
     fn ensure_resources(&mut self, width: u32, height: u32, mask_w: u32, mask_h: u32) -> Result<()> {
+        // Calculate render resolution: cap at output resolution, but don't exceed input resolution.
+        // This avoids processing at 4k if input is 1080p (even if output is 4k), or processing at 4k if output is 1080p (even if input is 4k).
+        let render_width = std::cmp::min(self.output_width, width);
+        let render_height = std::cmp::min(self.output_height, height);
+
         if self.cached_width == width && self.cached_height == height 
-           && self.cached_mask_width == mask_w && self.cached_mask_height == mask_h {
+           && self.cached_mask_width == mask_w && self.cached_mask_height == mask_h 
+           && !self.output_textures.is_empty() 
+           && self.output_textures[0].width() == render_width {
             return Ok(());
         }
 
-        info!("Creating GPU resources (Frame: {}x{}, Mask: {}x{})", width, height, mask_w, mask_h);
+        info!("Creating GPU resources (Input: {}x{}, Render: {}x{}, Output: {}x{}, Mask: {}x{})", 
+              width, height, render_width, render_height, self.output_width, self.output_height, mask_w, mask_h);
         
         // 1. Mask Texture (Create if size changed)
         if self.cached_mask_width != mask_w || self.cached_mask_height != mask_h {
@@ -720,7 +728,7 @@ impl WgpuPipeline {
         for i in 0..num_pipelines {
             let tex = self.context.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("Intermediate Texture {}", i)),
-                size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: render_width, height: render_height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -759,7 +767,7 @@ impl WgpuPipeline {
              if self.pipeline_mask_outputs.get(i).copied().unwrap_or(false) {
                  Some(self.context.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(&format!("Intermediate Mask Texture {}", i)),
-                    size: wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d { width: render_width, height: render_height, depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -1002,7 +1010,7 @@ impl WgpuPipeline {
                 if let Some(frame) = self.video_players[*player_idx].get_frame(time) {
                     let current_texture = &self.image_textures[slot_index];
                     
-                    // Check if texture needs resizing
+             // Check if texture needs resizing
                     if current_texture.width() != frame.width || current_texture.height() != frame.height {
                         info!("Resizing video texture slot {} to {}x{}", slot_index, frame.width, frame.height);
                         
@@ -1024,7 +1032,7 @@ impl WgpuPipeline {
                     // Upload video frame to texture
                     self.context.queue.write_texture(
                         wgpu::TexelCopyTextureInfo { 
-                            texture: &self.image_textures[slot_index], 
+                            texture: &self.image_textures[slot_index],  
                             mip_level: 0, 
                             origin: wgpu::Origin3d::ZERO, 
                             aspect: wgpu::TextureAspect::All 
