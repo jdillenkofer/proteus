@@ -57,6 +57,10 @@ pub struct Config {
     pub width: u32,
     /// Frame height
     pub height: u32,
+    /// Maximum frame width (for camera format selection)
+    pub max_input_width: Option<u32>,
+    /// Maximum frame height (for camera format selection)
+    pub max_input_height: Option<u32>,
     /// Target frames per second
     pub fps: u32,
     /// Output mode: window or virtual-camera
@@ -72,6 +76,8 @@ impl Default for Config {
             shader: Vec::new(),
             width: 1920,
             height: 1080,
+            max_input_width: None,
+            max_input_height: None,
             fps: 30,
             output: OutputMode::Window,
             textures: Vec::new(),
@@ -86,7 +92,7 @@ impl Default for Config {
 #[command(group = clap::ArgGroup::new("config_or_options")
     .required(false)
     .args(["config"])
-    .conflicts_with_all(["input", "shader", "width", "height", "fps", "output", "image", "video"])
+    .conflicts_with_all(["input", "shader", "width", "height", "max_input_width", "max_input_height", "fps", "output", "image", "video"])
 )]
 struct Args {
     /// Path to YAML configuration file (mutually exclusive with other options)
@@ -108,6 +114,14 @@ struct Args {
     /// Frame height
     #[arg(long, default_value = "1080")]
     height: u32,
+
+    /// Maximum frame width (defaults to width if not specified)
+    #[arg(long)]
+    max_input_width: Option<u32>,
+
+    /// Maximum frame height (defaults to height if not specified)
+    #[arg(long)]
+    max_input_height: Option<u32>,
 
     /// Target frames per second
     #[arg(long, default_value = "30")]
@@ -177,6 +191,8 @@ impl ProteusApp {
             device_id: self.args.input.clone(),
             width: self.args.width,
             height: self.args.height,
+            max_input_width: self.args.max_input_width.unwrap_or(self.args.width),
+            max_input_height: self.args.max_input_height.unwrap_or(self.args.height),
             fps: self.args.fps,
         };
 
@@ -291,6 +307,8 @@ impl ProteusApp {
                     device_id: new_config.input.clone(),
                     width: new_config.width,
                     height: new_config.height,
+                    max_input_width: new_config.max_input_width.unwrap_or(new_config.width),
+                    max_input_height: new_config.max_input_height.unwrap_or(new_config.height),
                     fps: new_config.fps,
                 };
 
@@ -530,6 +548,8 @@ fn load_config(path: &PathBuf) -> Result<(Args, Vec<(TextureInputType, PathBuf)>
         shader: config.shader,
         width: config.width,
         height: config.height,
+        max_input_width: config.max_input_width,
+        max_input_height: config.max_input_height,
         fps: config.fps,
         list_devices: false,
         output: config.output,
@@ -606,6 +626,8 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
         device_id: args.input.clone(),
         width: args.width,
         height: args.height,
+        max_input_width: args.max_input_width.unwrap_or(args.width),
+        max_input_height: args.max_input_height.unwrap_or(args.height),
         fps: args.fps,
     };
 
@@ -672,6 +694,8 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
                             device_id: new_config.input.clone(),
                             width: new_config.width,
                             height: new_config.height,
+                            max_input_width: new_config.max_input_width.unwrap_or(new_config.width),
+                            max_input_height: new_config.max_input_height.unwrap_or(new_config.height),
                             fps: new_config.fps,
                         };
                         

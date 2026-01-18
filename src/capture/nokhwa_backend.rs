@@ -87,8 +87,16 @@ impl CaptureBackend for NokhwaCapture {
                 .clone()
         };
 
+        // Filter seed formats by max dimensions
+        let filtered_seeds: Vec<_> = seed_formats.into_iter()
+            .filter(|fmt| fmt.width() <= config.max_input_width && fmt.height() <= config.max_input_height)
+            .collect();
+        
+        tracing::info!("Filtered seed formats to {} options (max {}x{})", 
+            filtered_seeds.len(), config.max_input_width, config.max_input_height);
+
         // Try to brute-force open the camera with known standard formats
-        for seed in seed_formats {
+        for seed in filtered_seeds {
             let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(seed));
             let idx = target_index.clone();
             
@@ -120,6 +128,11 @@ impl CaptureBackend for NokhwaCapture {
                     // 16:9 means width/height = 16/9 ≈ 1.777...
                     // Check: width * 9 == height * 16
                     if fmt.width() * 9 != fmt.height() * 16 {
+                        continue;
+                    }
+                    
+                    // Filter by max dimensions if specified
+                    if fmt.width() > config.max_input_width || fmt.height() > config.max_input_height {
                         continue;
                     }
                     

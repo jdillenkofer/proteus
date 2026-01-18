@@ -200,6 +200,8 @@ Proteus will automatically resolve the stream using `streamlink` and pipe it to 
 | `-s, --shader <PATH>` | Path to GLSL fragment shader | None (Passthrough) |
 | `--width <PIXELS>` | Frame width | 1920 |
 | `--height <PIXELS>` | Frame height | 1080 |
+| `--max-input-width <PIXELS>` | Maximum camera input width | Same as `--width` |
+| `--max-input-height <PIXELS>` | Maximum camera input height | Same as `--height` |
 | `--fps <FPS>` | Target frames per second | 30 |
 | `--output <MODE>` | `window` or `virtual-camera` | window |
 | `--image <PATH>` | Load image into next available texture slot | - |
@@ -220,6 +222,11 @@ input: "0"
 width: 1920
 height: 1080
 fps: 30
+
+# Maximum camera input resolution (optional, defaults to width/height)
+# Useful to limit camera capture to a lower resolution for performance
+max_input_width: 1280
+max_input_height: 720
 
 # Output mode: 'window' or 'virtual-camera'
 output: window

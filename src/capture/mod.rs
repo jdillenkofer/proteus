@@ -48,6 +48,10 @@ pub struct CaptureConfig {
     pub width: u32,
     /// Desired frame height
     pub height: u32,
+    /// Maximum frame width (for camera format selection)
+    pub max_input_width: u32,
+    /// Maximum frame height (for camera format selection)
+    pub max_input_height: u32,
     /// Desired frame rate
     pub fps: u32,
 }
@@ -58,6 +62,8 @@ impl Default for CaptureConfig {
             device_id: "0".to_string(),
             width: 1920,
             height: 1080,
+            max_input_width: 1920,
+            max_input_height: 1080,
             fps: 30,
         }
     }
