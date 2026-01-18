@@ -6,7 +6,6 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::fs;
-use std::time::Duration;
 use tracing::{info, error};
 
 /// Manages configuration file watching and reloading.
@@ -121,26 +120,13 @@ pub fn load_textures(ordered_inputs: &[(TextureInputType, PathBuf)]) -> Vec<Text
     texture_sources
 }
 
-/// Helper to initialize camera with retry logic.
-pub fn init_capture_with_retry(config: CaptureConfig) -> Option<AsyncCapture> {
-    let mut attempts = 0;
-    while attempts < 3 {
-        attempts += 1;
-        // Give OS time to release device - progressively longer
-        if attempts > 1 {
-             std::thread::sleep(Duration::from_millis(500 * attempts as u64));
-        }
-        
-        match AsyncCapture::new(config.clone()) {
-            Ok(capture) => return Some(capture),
-            Err(e) => {
-                 if attempts >= 3 {
-                     error!("Failed to initialize capture after 3 attempts: {}", e);
-                 } else {
-                     tracing::warn!("Capture init failed (attempt {}), retrying...", attempts);
-                 }
-            }
+/// Helper to initialize camera.
+pub fn init_capture(config: CaptureConfig) -> Option<AsyncCapture> {
+    match AsyncCapture::new(config) {
+        Ok(capture) => Some(capture),
+        Err(e) => {
+             error!("Failed to initialize capture: {}", e);
+             None
         }
     }
-    None
 }

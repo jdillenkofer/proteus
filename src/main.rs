@@ -1,7 +1,7 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 mod config_utils;
-use config_utils::{ConfigWatcher, load_shaders, load_textures, init_capture_with_retry};
+use config_utils::{ConfigWatcher, load_shaders, load_textures, init_capture};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
@@ -182,7 +182,7 @@ impl ProteusApp {
 
         info!("Opening camera device {}...", self.args.input);
         
-        if let Some(capture) = init_capture_with_retry(config) {
+        if let Some(capture) = init_capture(config) {
              let (cam_w, cam_h) = capture.frame_size();
              info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
              self.capture = Some(capture);
@@ -297,7 +297,7 @@ impl ProteusApp {
                 // Drop old capture first
                 self.capture = None;
                 
-                if let Some(capture) = init_capture_with_retry(capture_config) {
+                if let Some(capture) = init_capture(capture_config) {
                      self.capture = Some(capture);
                      info!("Capture re-initialized (Device: {}, {}x{} @ {}fps)", 
                            new_config.input, new_config.width, new_config.height, new_config.fps);
@@ -678,7 +678,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
                         // Drop old capture first
                         capture = None;
                         
-                        if let Some(new_capture) = init_capture_with_retry(capture_config) {
+                        if let Some(new_capture) = init_capture(capture_config) {
                              capture = Some(new_capture);
                              info!("Capture re-initialized (Device: {}, {}x{} @ {}fps)", 
                                    new_config.input, new_config.width, new_config.height, new_config.fps);
