@@ -687,15 +687,26 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
                         }
 
                         // Re-initialize Virtual Camera Output
+                        // Must drop old output first to release the global lock!
+                        drop(output);
+                        
                         let vc_config = VirtualCameraConfig {
                             width: new_config.width,
                             height: new_config.height,
                             fps: new_config.fps,
-                            ..Default::default()
                         };
+                        
                         match VirtualCameraOutput::new(vc_config) {
                             Ok(new_output) => output = new_output,
-                            Err(e) => error!("Failed to re-initialize virtual camera output: {}", e),
+                            Err(e) => {
+                                error!("Failed to re-initialize virtual camera output: {}", e);
+                                // If we failed, we have no output. We should probably crash or retry?
+                                // For now, we'll crash on next write, or... wait.
+                                // We can't easily recover here without complex logic.
+                                // Ideally we should keep the old one if new fails, but we dropped it.
+                                // Given the lock requirement, we had to drop it.
+                                return Err(anyhow::anyhow!("Critical error: Failed to re-init output: {}", e));
+                            },
                         }
                         
                         recreate_pipeline = true; // Pipeline depends on resolution
