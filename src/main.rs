@@ -1,7 +1,7 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
 mod config_utils;
-use config_utils::{ConfigWatcher, load_shaders, load_textures, load_textures_from_config, textures_to_ordered_inputs, init_capture};
+use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures, load_textures_from_config, textures_to_ordered_inputs, init_capture};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
@@ -278,20 +278,13 @@ impl ProteusApp {
 
     fn handle_config_change(&mut self, old_config_opt: Option<Config>, new_config: Config) {
         if let Some(old_config) = old_config_opt {
-            // Only shader and texture changes are hot-reloadable
-            // All other changes require a restart
-            if new_config.output != old_config.output ||
-               new_config.input != old_config.input ||
-               new_config.width != old_config.width ||
-               new_config.height != old_config.height ||
-               new_config.max_input_width != old_config.max_input_width ||
-               new_config.max_input_height != old_config.max_input_height ||
-               new_config.fps != old_config.fps {
+            let diff = ConfigDiff::compare(&old_config, &new_config);
+            
+            if diff.requires_restart {
                 tracing::warn!("Changes to output, input, width, height, max_input_width, max_input_height, or fps require a restart.");
             }
 
-            // Hot-reload shader/texture changes
-            if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
+            if diff.needs_pipeline_reload() {
                 info!("Reloading pipeline due to shader/texture changes...");
                 if let Err(e) = self.rebuild_pipeline(&new_config) {
                      error!("Failed to rebuild pipeline: {}", e);
@@ -601,20 +594,13 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
         if let Some(watcher) = &mut config_watcher {
             if let Some((old_config_opt, new_config)) = watcher.check_for_changes() {
                  if let Some(old_config) = old_config_opt {
-                     // Only shader and texture changes are hot-reloadable
-                     // All other changes require a restart
-                     if new_config.output != old_config.output ||
-                        new_config.input != old_config.input ||
-                        new_config.width != old_config.width ||
-                        new_config.height != old_config.height ||
-                        new_config.max_input_width != old_config.max_input_width ||
-                        new_config.max_input_height != old_config.max_input_height ||
-                        new_config.fps != old_config.fps {
+                     let diff = ConfigDiff::compare(&old_config, &new_config);
+                     
+                     if diff.requires_restart {
                          tracing::warn!("Changes to output, input, width, height, max_input_width, max_input_height, or fps require a restart.");
                      }
 
-                    // Hot-reload shader/texture changes
-                    if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
+                    if diff.needs_pipeline_reload() {
                         info!("Reloading pipeline due to shader/texture changes...");
                         let new_shaders = load_shaders(&new_config.shader);
                         let new_texture_sources = load_textures_from_config(&new_config.textures);

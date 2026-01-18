@@ -8,6 +8,43 @@ use std::sync::mpsc::{channel, Receiver};
 use std::fs;
 use tracing::{info, error};
 
+/// Result of comparing two Config instances.
+/// Used to determine what actions to take on config reload.
+#[derive(Debug)]
+pub struct ConfigDiff {
+    /// Changes that require a full restart (output, input, dimensions, fps)
+    pub requires_restart: bool,
+    /// Shader list changed (hot-reloadable)
+    pub shader_changed: bool,
+    /// Texture list changed (hot-reloadable)
+    pub textures_changed: bool,
+}
+
+impl ConfigDiff {
+    /// Compare two configs and determine what changed.
+    pub fn compare(old: &crate::Config, new: &crate::Config) -> Self {
+        let requires_restart = 
+            old.output != new.output ||
+            old.input != new.input ||
+            old.width != new.width ||
+            old.height != new.height ||
+            old.max_input_width != new.max_input_width ||
+            old.max_input_height != new.max_input_height ||
+            old.fps != new.fps;
+            
+        Self {
+            requires_restart,
+            shader_changed: old.shader != new.shader,
+            textures_changed: old.textures != new.textures,
+        }
+    }
+    
+    /// Returns true if shaders or textures changed (hot-reloadable changes).
+    pub fn needs_pipeline_reload(&self) -> bool {
+        self.shader_changed || self.textures_changed
+    }
+}
+
 /// Manages configuration file watching and reloading.
 pub struct ConfigWatcher {
     path: PathBuf,
