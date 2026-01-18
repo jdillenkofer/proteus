@@ -11,6 +11,7 @@ use proteus::shader::{ShaderSource, TextureSlot, WgpuPipeline};
 use proteus::shader::ShaderPipeline;
 use proteus::shader::gpu_context::GpuContext;
 use proteus::video::VideoPlayer;
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +24,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 /// Output mode for processed video.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutputMode {
     /// Display in a window (default)
     Window,
@@ -35,11 +37,62 @@ pub enum OutputMode {
     VirtualCamera,
 }
 
+/// A texture input for shaders (image or video).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum TextureInput {
+    Image { path: PathBuf },
+    Video { path: PathBuf },
+}
+
+/// Configuration file structure.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// Camera device index
+    pub input: u32,
+    /// Path to GLSL fragment shader file(s)
+    pub shader: Vec<PathBuf>,
+    /// Frame width
+    pub width: u32,
+    /// Frame height
+    pub height: u32,
+    /// Target frames per second
+    pub fps: u32,
+    /// Output mode: window or virtual-camera
+    pub output: OutputMode,
+    /// Ordered texture inputs (images and videos)
+    pub textures: Vec<TextureInput>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            input: 0,
+            shader: Vec::new(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            output: OutputMode::Window,
+            textures: Vec::new(),
+        }
+    }
+}
+
 /// Cross-platform shader webcam transformer.
 #[derive(Parser, Debug)]
 #[command(name = "proteus")]
 #[command(about = "Apply GPU shaders to webcam video in real-time")]
+#[command(group = clap::ArgGroup::new("config_or_options")
+    .required(false)
+    .args(["config"])
+    .conflicts_with_all(["input", "shader", "width", "height", "fps", "output", "image", "video"])
+)]
 struct Args {
+    /// Path to YAML configuration file (mutually exclusive with other options)
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
     /// Camera device index
     #[arg(short, long, default_value = "0")]
     input: u32,
@@ -318,10 +371,10 @@ fn main() -> Result<()> {
         tracing::warn!("Failed to initialize ONNX Runtime: {}. Segmentation will be unavailable.", e);
     }
 
-    let args = Args::parse();
+    let cli_args = Args::parse();
 
-    // List devices mode
-    if args.list_devices {
+    // List devices mode (allowed with or without config)
+    if cli_args.list_devices {
         println!("Available cameras:");
         match NokhwaCapture::list_devices() {
             Ok(devices) => {
@@ -336,32 +389,69 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Load config from file or use CLI args
+    let (args, ordered_inputs) = if let Some(config_path) = &cli_args.config {
+        load_config(config_path)?
+    } else {
+        // Build ordered inputs from CLI args
+        let ordered_inputs = build_ordered_inputs_from_cli(&cli_args);
+        (cli_args, ordered_inputs)
+    };
+
     info!("Starting Proteus...");
 
     // Dispatch based on output mode
     match args.output {
-        OutputMode::Window => run_window_mode(args)?,
+        OutputMode::Window => run_window_mode(args, ordered_inputs)?,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-        OutputMode::VirtualCamera => run_virtual_camera_mode(args)?,
+        OutputMode::VirtualCamera => run_virtual_camera_mode(args, ordered_inputs)?,
     }
 
     Ok(())
 }
 
-/// Run in window output mode (default).
-fn run_window_mode(args: Args) -> Result<()> {
-    // Build ordered list of texture inputs
+/// Load configuration from a YAML file and convert to Args.
+fn load_config(path: &PathBuf) -> Result<(Args, Vec<(TextureInputType, PathBuf)>)> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read config file {:?}: {}", path, e))?;
+    
+    let config: Config = serde_yaml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse config file {:?}: {}", path, e))?;
+    
+    info!("Loaded configuration from {:?}", path);
+    
+    // Convert textures to ordered inputs
+    let ordered_inputs: Vec<(TextureInputType, PathBuf)> = config.textures
+        .iter()
+        .map(|t| match t {
+            TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
+            TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
+        })
+        .collect();
+    
+    // Convert Config to Args
+    let args = Args {
+        config: Some(path.clone()),
+        input: config.input,
+        shader: config.shader,
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
+        list_devices: false,
+        output: config.output,
+        image: Vec::new(), // Not used when loading from config
+        video: Vec::new(), // Not used when loading from config
+    };
+    
+    Ok((args, ordered_inputs))
+}
+
+/// Build ordered texture inputs from CLI arguments.
+fn build_ordered_inputs_from_cli(args: &Args) -> Vec<(TextureInputType, PathBuf)> {
+    let matches = Args::command().get_matches();
     let mut ordered_inputs: Vec<(usize, TextureInputType, PathBuf)> = Vec::new();
 
-    // We need to match indices to values to preserve CLI order
-    let matches = Args::command().get_matches();
-
     if let Some(indices) = matches.indices_of("video") {
-        // Warning: We must reconstruct the values because we can't easily zip matches.get_many() with indices_of()
-        // comfortably while using the typed Args struct.
-        // Actually, we can use the typed args for values since clap preserves order.
-        // But we need to use the matches to get indices.
-
         let paths: Vec<&PathBuf> = args.video.iter().collect();
         for (i, idx) in indices.enumerate() {
             if i < paths.len() {
@@ -380,9 +470,12 @@ fn run_window_mode(args: Args) -> Result<()> {
     }
 
     ordered_inputs.sort_by_key(|k| k.0);
+    ordered_inputs.into_iter().map(|(_, t, p)| (t, p)).collect()
+}
 
-    let mut app = ProteusApp::new(args, ordered_inputs.into_iter().map(|(_, t, p)| (t, p)).collect());
-
+/// Run in window output mode (default).
+fn run_window_mode(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Result<()> {
+    let mut app = ProteusApp::new(args, ordered_inputs);
 
     // Create event loop
     let event_loop = EventLoop::new()?;
@@ -402,7 +495,7 @@ enum TextureInputType {
 
 /// Run in virtual camera output mode.
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-fn run_virtual_camera_mode(args: Args) -> Result<()> {
+fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
@@ -438,39 +531,11 @@ fn run_virtual_camera_mode(args: Args) -> Result<()> {
         }
     }
 
-    // Initialize shader pipeline
-    // Build texture sources: videos first, then images (up to 4 total)
-    // Initialize shader pipeline
     // Build texture sources from ordered inputs (up to 4 total)
     let mut texture_sources: Vec<TextureSlot> = Vec::new();
 
-    // We need to match indices to values to preserve CLI order
-    let matches = Args::command().get_matches();
-    let mut ordered_inputs: Vec<(usize, TextureInputType, PathBuf)> = Vec::new();
-
-    if let Some(indices) = matches.indices_of("video") {
-        let paths: Vec<&PathBuf> = args.video.iter().collect();
-        for (i, idx) in indices.enumerate() {
-            if i < paths.len() {
-                ordered_inputs.push((idx, TextureInputType::Video, paths[i].clone()));
-            }
-        }
-    }
-
-    if let Some(indices) = matches.indices_of("image") {
-        let paths: Vec<&PathBuf> = args.image.iter().collect();
-        for (i, idx) in indices.enumerate() {
-            if i < paths.len() {
-                ordered_inputs.push((idx, TextureInputType::Image, paths[i].clone()));
-            }
-        }
-    }
-    
-    ordered_inputs.sort_by_key(|k| k.0);
-
-    for idx in 0..ordered_inputs.len() {
+    for (input_type, path) in &ordered_inputs {
         if texture_sources.len() >= 4 { break; }
-        let (_, input_type, path) = &ordered_inputs[idx];
         match input_type {
             TextureInputType::Video => {
                 match VideoPlayer::new(path) {
