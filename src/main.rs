@@ -1,21 +1,19 @@
 //! Proteus: Cross-platform shader webcam transformer CLI.
 
+mod config_utils;
+use config_utils::{ConfigWatcher, load_shaders, load_textures, init_capture_with_retry};
+
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
 use proteus::capture::{AsyncCapture, CaptureBackend, CaptureConfig, NokhwaCapture};
 use proteus::output::window_output::WindowRenderer;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
-use proteus::shader::{ShaderSource, TextureSlot, WgpuPipeline};
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-use proteus::shader::ShaderPipeline;
+use proteus::shader::{WgpuPipeline, ShaderPipeline};
 use proteus::shader::gpu_context::GpuContext;
-use proteus::video::VideoPlayer;
 use serde::Deserialize;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
-use std::sync::mpsc::{channel, Receiver};
-use std::fs;
 use std::path::PathBuf;
+use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info};
@@ -147,46 +145,14 @@ struct ProteusApp {
     frame_count: u32,
     fps_last_time: Instant,
     // Config hot-reloading
-    current_config: Option<Config>,
-    config_path: Option<PathBuf>,
-    _config_watcher: Option<RecommendedWatcher>,
-    config_reload_rx: Option<Receiver<std::result::Result<Event, notify::Error>>>,
+    config_watcher: Option<ConfigWatcher>,
 }
 
 impl ProteusApp {
     fn new(args: Args, ordered_inputs: Vec<(TextureInputType, PathBuf)>) -> Self {
         let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
         
-        // Setup config watcher if config file is used
-        let (current_config, config_path, _config_watcher, config_reload_rx) = if let Some(path) = &args.config {
-            let (tx, rx) = channel();
-            let mut watcher: Option<RecommendedWatcher> = None;
-            let mut current_config = None;
-
-            match RecommendedWatcher::new(tx, notify::Config::default()) {
-                Ok(mut w) => {
-                    if let Err(e) = w.watch(path, RecursiveMode::NonRecursive) {
-                        tracing::warn!("Failed to watch config file {:?}: {}", path, e);
-                    } else {
-                        info!("Watching config file {:?} for changes", path);
-                        watcher = Some(w);
-                        
-                        // Load initial config state for valid comparison later
-                        if let Ok(content) = fs::read_to_string(path) {
-                            if let Ok(cfg) = serde_yaml::from_str::<Config>(&content) {
-                                current_config = Some(cfg);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create config watcher: {}", e);
-                }
-            }
-            (current_config, Some(path.clone()), watcher, Some(rx))
-        } else {
-            (None, None, None, None)
-        };
+        let config_watcher = ConfigWatcher::new(args.config.clone());
 
         Self {
             args,
@@ -201,10 +167,7 @@ impl ProteusApp {
             start_time: Instant::now(),
             frame_count: 0,
             fps_last_time: Instant::now(),
-            current_config,
-            config_path,
-            _config_watcher,
-            config_reload_rx,
+            config_watcher,
         }
     }
 
@@ -218,45 +181,22 @@ impl ProteusApp {
         };
 
         info!("Opening camera device {}...", self.args.input);
-        let capture = AsyncCapture::new(config)?;
-        let (cam_w, cam_h) = capture.frame_size();
-        info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
-        self.capture = Some(capture);
+        
+        if let Some(capture) = init_capture_with_retry(config) {
+             let (cam_w, cam_h) = capture.frame_size();
+             info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
+             self.capture = Some(capture);
+        } else {
+             error!("Failed to initialize camera capture");
+             // Don't error out, just continue without capture (recoverable via config reload)
+        }
 
         // Load shaders if provided
-        let mut shaders = Vec::new();
-        if self.args.shader.is_empty() {
-            info!("Using passthrough shader");
-            // Empty list implies default behavior in pipeline or we can pass None equivalent
-        } else {
-            for path in &self.args.shader {
-                info!("Loading shader from {:?}", path);
-                let source = fs::read_to_string(path)?;
-                shaders.push(ShaderSource::Glsl { code: source, path: Some(path.clone()) });
-            }
-        }
+        let shaders = load_shaders(&self.args.shader);
 
         // Initialize shader pipeline
         // Build texture sources from ordered inputs (up to 4 total)
-        let mut texture_sources: Vec<TextureSlot> = Vec::new();
-        
-        for (input_type, path) in &self.ordered_inputs {
-            if texture_sources.len() >= 4 { break; }
-            match input_type {
-                TextureInputType::Video => {
-                    match VideoPlayer::new(path) {
-                        Ok(player) => texture_sources.push(TextureSlot::Video(player)),
-                        Err(e) => {
-                            error!("Failed to open video {:?}: {}", path, e);
-                            texture_sources.push(TextureSlot::Empty);
-                        }
-                    }
-                },
-                TextureInputType::Image => {
-                    texture_sources.push(TextureSlot::Image(path.clone()));
-                }
-            }
-        }
+        let texture_sources = load_textures(&self.ordered_inputs);
         
 
         
@@ -313,55 +253,75 @@ impl ProteusApp {
 
     /// Check for config file updates and reload if necessary.
     fn check_config_reload(&mut self) {
-        let Some(rx) = &self.config_reload_rx else { return; };
-        
-        let mut needs_reload = false;
-        // Drain to get latest changes
-        while let Ok(res) = rx.try_recv() {
-            match res {
-                Ok(event) => {
-                    if matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_)) {
-                        needs_reload = true;
-                    }
-                }
-                Err(e) => tracing::warn!("Config watch error: {}", e),
-            }
-        }
-
-        if needs_reload {
-            if let Some(path) = &self.config_path {
-                info!("Config file changed, checking for updates...");
-                match fs::read_to_string(path) {
-                    Ok(content) => {
-                        match serde_yaml::from_str::<Config>(&content) {
-                            Ok(new_config) => {
-                                self.handle_config_change(new_config);
-                            }
-                            Err(e) => error!("Failed to parse new config: {}", e),
-                        }
-                    }
-                    Err(e) => error!("Failed to read config file: {}", e),
-                }
+        if let Some(watcher) = &mut self.config_watcher {
+            if let Some((old_config, new_config)) = watcher.check_for_changes() {
+                self.handle_config_change(old_config, new_config);
             }
         }
     }
 
-    fn handle_config_change(&mut self, new_config: Config) {
-        if let Some(old_config) = &self.current_config {
-            // Check for restart-required changes
+    fn handle_config_change(&mut self, old_config_opt: Option<Config>, new_config: Config) {
+        if let Some(old_config) = old_config_opt {
+            let mut recreate_pipeline = false;
+
+            // 1. Output Change (Unavailable)
+            if new_config.output != old_config.output {
+                tracing::warn!("Changing output mode requires a restart.");
+            }
+
+            // 2. Capture/Window Change (Input, Width, Height, FPS)
             if new_config.input != old_config.input ||
                new_config.width != old_config.width ||
                new_config.height != old_config.height ||
-               new_config.fps != old_config.fps ||
-               new_config.output != old_config.output {
-                tracing::warn!("Changes to input, width, height, fps, or output require a restart to take effect.");
+               new_config.fps != old_config.fps {
+                
+                info!("Config change detected: Re-initializing capture...");
+
+                // Update FPS/Duration
+                self.args.fps = new_config.fps;
+                self.frame_duration = Duration::from_secs_f64(1.0 / new_config.fps as f64);
+                
+                // Update dimensions
+                self.args.width = new_config.width;
+                self.args.height = new_config.height;
+                self.args.input = new_config.input;
+
+                // Re-initialize capture
+                let capture_config = CaptureConfig {
+                    device_index: new_config.input,
+                    width: new_config.width,
+                    height: new_config.height,
+                    fps: new_config.fps,
+                };
+
+                // Drop old capture first
+                self.capture = None;
+                
+                if let Some(capture) = init_capture_with_retry(capture_config) {
+                     self.capture = Some(capture);
+                     info!("Capture re-initialized (Device: {}, {}x{} @ {}fps)", 
+                           new_config.input, new_config.width, new_config.height, new_config.fps);
+                } else {
+                     error!("Failed to re-initialize capture");
+                }
+
+                // Resize Window if needed
+                if new_config.width != old_config.width || new_config.height != old_config.height {
+                    if let Some(window) = &self.window {
+                        let size = PhysicalSize::new(new_config.width, new_config.height);
+                        let _ = window.request_inner_size(size);
+                    }
+                    recreate_pipeline = true; // Pipeline depends on resolution
+                }
             }
 
-            // Check for hot-reloadable changes
+            // 3. Shader/Texture Change
             if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
-                info!("Reloading pipeline due to shader/texture changes...");
-                
-                // Rebuild pipeline
+                recreate_pipeline = true;
+            }
+
+            if recreate_pipeline {
+                info!("Reloading pipeline due to config changes...");
                 if let Err(e) = self.rebuild_pipeline(&new_config) {
                      error!("Failed to rebuild pipeline: {}", e);
                 } else {
@@ -370,41 +330,28 @@ impl ProteusApp {
             }
         } else {
              // Should not happen if initialized correctly
-             self.current_config = Some(new_config.clone());
+             // self.current_config = Some(new_config.clone());
         }
-        self.current_config = Some(new_config);
+        // self.current_config = Some(new_config);
     }
 
     fn rebuild_pipeline(&mut self, config: &Config) -> Result<()> {
        // Load shaders
-       let mut shaders = Vec::new();
-       if config.shader.is_empty() {
-             info!("Using passthrough shader");
-       } else {
-           for path in &config.shader {
-               info!("Loading shader from {:?}", path);
-               let source = fs::read_to_string(path)?;
-               shaders.push(ShaderSource::Glsl { code: source, path: Some(path.clone()) });
-           }
-       }
+       let shaders = load_shaders(&config.shader);
        
-       // Load textures
-       let mut texture_sources = Vec::new();
-       for texture in &config.textures {
-           if texture_sources.len() >= 4 { break; }
-           match texture {
-                TextureInput::Image { path } => texture_sources.push(TextureSlot::Image(path.clone())),
-                TextureInput::Video { path } => {
-                     match VideoPlayer::new(path) {
-                         Ok(player) => texture_sources.push(TextureSlot::Video(player)),
-                         Err(e) => {
-                             error!("Failed to open video {:?}: {}", path, e);
-                             texture_sources.push(TextureSlot::Empty);
-                         }
-                     }
-                }
-           }
-       }
+       // Load textures - need to convert config textures to ordered inputs format temporarily or 
+       // just update load_textures to handle simple iterator?
+       // Actually load_textures takes `&[(TextureInputType, PathBuf)]`.
+       // We should construct that vector here.
+       let ordered_inputs: Vec<(TextureInputType, PathBuf)> = config.textures
+           .iter()
+           .map(|t| match t {
+               TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
+               TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
+           })
+           .collect();
+           
+       let texture_sources = load_textures(&ordered_inputs);
        
        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("No GPU context"))?;
        let pipeline = WgpuPipeline::new(context, self.args.width, self.args.height, shaders, texture_sources)?;
@@ -663,72 +610,17 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
     };
 
     info!("Opening camera device {}...", args.input);
-    let mut capture = AsyncCapture::new(config)?;
+    let mut capture = Some(AsyncCapture::new(config)?);
     info!("Camera opened successfully (async capture)");
 
     // Load shaders if provided
-    let mut shaders = Vec::new();
-    if args.shader.is_empty() {
-        info!("Using passthrough shader");
-    } else {
-        for path in &args.shader {
-            info!("Loading shader from {:?}", path);
-            let source = fs::read_to_string(path)?;
-            shaders.push(ShaderSource::Glsl { code: source, path: Some(path.clone()) });
-        }
-    }
+    let shaders = load_shaders(&args.shader);
 
     // Build texture sources from ordered inputs (up to 4 total)
-    let mut texture_sources: Vec<TextureSlot> = Vec::new();
-
-    for (input_type, path) in &ordered_inputs {
-        if texture_sources.len() >= 4 { break; }
-        match input_type {
-            TextureInputType::Video => {
-                match VideoPlayer::new(path) {
-                    Ok(player) => texture_sources.push(TextureSlot::Video(player)),
-                    Err(e) => {
-                        error!("Failed to open video {:?}: {}", path, e);
-                        texture_sources.push(TextureSlot::Empty);
-                    }
-                }
-            },
-            TextureInputType::Image => {
-                texture_sources.push(TextureSlot::Image(path.clone()));
-            }
-        }
-    }
+    let texture_sources = load_textures(&ordered_inputs);
     
     // Initialize config watcher if config file is used
-    let (mut current_config, config_path, _config_watcher, config_reload_rx) = if let Some(path) = &args.config {
-        let (tx, rx) = channel();
-        let mut watcher: Option<RecommendedWatcher> = None;
-        let mut current_config = None;
-
-        match RecommendedWatcher::new(tx, notify::Config::default()) {
-            Ok(mut w) => {
-                if let Err(e) = w.watch(path, RecursiveMode::NonRecursive) {
-                    tracing::warn!("Failed to watch config file {:?}: {}", path, e);
-                } else {
-                    info!("Watching config file {:?} for changes", path);
-                    watcher = Some(w);
-                    
-                    // Load initial config state for valid comparison later
-                    if let Ok(content) = fs::read_to_string(path) {
-                        if let Ok(cfg) = serde_yaml::from_str::<Config>(&content) {
-                            current_config = Some(cfg);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create config watcher: {}", e);
-            }
-        }
-        (current_config, Some(path.clone()), watcher, Some(rx))
-    } else {
-        (None, None, None, None)
-    };
+    let mut config_watcher = ConfigWatcher::new(args.config.clone());
 
     // Initialize GPU Context (headless/no-window)
     let context = Arc::new(GpuContext::new(None)?);
@@ -746,7 +638,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
     let mut output = VirtualCameraOutput::new(vc_config)?;
     info!("Virtual camera output initialized");
 
-    let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
+    let mut frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
     let start_time = Instant::now();
     let mut frame_count = 0u32;
     let mut fps_last_time = Instant::now();
@@ -755,81 +647,91 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
     // Main loop
     while running.load(Ordering::SeqCst) {
         // Check for config reload
-        if let Some(rx) = &config_reload_rx {
-             let mut needs_reload = false;
-             while let Ok(res) = rx.try_recv() {
-                 if let Ok(event) = res {
-                     if matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_)) {
-                         needs_reload = true;
+        if let Some(watcher) = &mut config_watcher {
+            if let Some((old_config_opt, new_config)) = watcher.check_for_changes() {
+                 if let Some(old_config) = old_config_opt {
+                     let mut recreate_pipeline = false;
+                     
+                     if new_config.output != old_config.output {
+                         tracing::warn!("Changing output mode requires a restart.");
                      }
-                 }
-             }
-             
-             if needs_reload {
-                 if let Some(path) = &config_path {
-                     info!("Config file changed, checking for updates...");
-                     if let Ok(content) = fs::read_to_string(path) {
-                         if let Ok(new_config) = serde_yaml::from_str::<Config>(&content) {
-                             if let Some(old_config) = &current_config {
-                                 // Check for restart-required changes
-                                if new_config.input != old_config.input ||
-                                   new_config.width != old_config.width ||
-                                   new_config.height != old_config.height ||
-                                   new_config.fps != old_config.fps ||
-                                   new_config.output != old_config.output {
-                                    tracing::warn!("Changes to input, width, height, fps, or output require a restart to take effect.");
-                                }
 
-                                // Check for hot-reloadable changes
-                                if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
-                                    info!("Reloading pipeline due to shader/texture changes...");
-                                    
-                                    // Load shaders
-                                   let mut new_shaders = Vec::new();
-                                   if new_config.shader.is_empty() {
-                                         info!("Using passthrough shader");
-                                   } else {
-                                       for path in &new_config.shader {
-                                           info!("Loading shader from {:?}", path);
-                                           match fs::read_to_string(path) {
-                                               Ok(source) => new_shaders.push(ShaderSource::Glsl { code: source, path: Some(path.clone()) }),
-                                               Err(e) => error!("Failed to read shader {:?}: {}", path, e),
-                                           }
-                                       }
-                                   }
-                                   
-                                   // Load textures
-                                   let mut new_texture_sources = Vec::new();
-                                   for texture in &new_config.textures {
-                                       if new_texture_sources.len() >= 4 { break; }
-                                       match texture {
-                                            TextureInput::Image { path } => new_texture_sources.push(TextureSlot::Image(path.clone())),
-                                            TextureInput::Video { path } => {
-                                                 match VideoPlayer::new(path) {
-                                                     Ok(player) => new_texture_sources.push(TextureSlot::Video(player)),
-                                                     Err(e) => {
-                                                         error!("Failed to open video {:?}: {}", path, e);
-                                                         new_texture_sources.push(TextureSlot::Empty);
-                                                     }
-                                                 }
-                                            }
-                                       }
-                                   }
-                                   
-                                   match WgpuPipeline::new(context.clone(), args.width, args.height, new_shaders, new_texture_sources) {
-                                       Ok(new_pipeline) => {
-                                           pipeline = new_pipeline;
-                                           info!("Pipeline reloaded successfully");
-                                       }
-                                       Err(e) => error!("Failed to rebuild pipeline: {}", e),
-                                   }
-                                }
-                             }
-                             current_config = Some(new_config);
-                         }
-                     }
+                     // Check for re-initialization fields
+                    if new_config.input != old_config.input ||
+                       new_config.width != old_config.width ||
+                       new_config.height != old_config.height ||
+                       new_config.fps != old_config.fps {
+                        
+                        info!("Config change detected: Re-initializing capture and output...");
+
+                        // Update Loop timing
+                        frame_duration = Duration::from_secs_f64(1.0 / new_config.fps as f64);
+                        
+                        // Re-initialize capture
+                        let capture_config = CaptureConfig {
+                            device_index: new_config.input,
+                            width: new_config.width,
+                            height: new_config.height,
+                            fps: new_config.fps,
+                        };
+                        
+                        // Drop old capture first
+                        capture = None;
+                        
+                        if let Some(new_capture) = init_capture_with_retry(capture_config) {
+                             capture = Some(new_capture);
+                             info!("Capture re-initialized (Device: {}, {}x{} @ {}fps)", 
+                                   new_config.input, new_config.width, new_config.height, new_config.fps);
+                        } else {
+                             error!("Failed to re-initialize capture");
+                        }
+
+                        // Re-initialize Virtual Camera Output
+                        let vc_config = VirtualCameraConfig {
+                            width: new_config.width,
+                            height: new_config.height,
+                            fps: new_config.fps,
+                            ..Default::default()
+                        };
+                        match VirtualCameraOutput::new(vc_config) {
+                            Ok(new_output) => output = new_output,
+                            Err(e) => error!("Failed to re-initialize virtual camera output: {}", e),
+                        }
+                        
+                        recreate_pipeline = true; // Pipeline depends on resolution
+                    }
+
+                    // Check for hot-reloadable changes
+                    if new_config.shader != old_config.shader || new_config.textures != old_config.textures {
+                        recreate_pipeline = true;
+                    }
+
+                    if recreate_pipeline {
+                        info!("Reloading pipeline due to config changes...");
+                        
+                        // Load shaders
+                        let new_shaders = load_shaders(&new_config.shader);
+                       
+                       // Load textures
+                       let ordered_inputs: Vec<(TextureInputType, PathBuf)> = new_config.textures
+                           .iter()
+                           .map(|t| match t {
+                               TextureInput::Image { path } => (TextureInputType::Image, path.clone()),
+                               TextureInput::Video { path } => (TextureInputType::Video, path.clone()),
+                           })
+                           .collect();
+                       let new_texture_sources = load_textures(&ordered_inputs);
+                       
+                       match WgpuPipeline::new(context.clone(), new_config.width, new_config.height, new_shaders, new_texture_sources) {
+                           Ok(new_pipeline) => {
+                               pipeline = new_pipeline;
+                               info!("Pipeline reloaded successfully");
+                           }
+                           Err(e) => error!("Failed to rebuild pipeline: {}", e),
+                       }
+                    }
                  }
-             }
+            }
         }
 
         let frame_start = Instant::now();
@@ -845,7 +747,13 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
         }
 
         // Get latest frame (non-blocking)
-        if let Some(frame) = capture.get_latest_frame() {
+        let frame_option = if let Some(cap) = &mut capture {
+            cap.get_latest_frame()
+        } else {
+            None
+        };
+
+        if let Some(frame) = frame_option {
             // Process through shader
             let time = start_time.elapsed().as_secs_f32();
             match pipeline.process_frame(frame, time) {
