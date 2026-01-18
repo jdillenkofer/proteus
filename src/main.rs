@@ -49,6 +49,9 @@ pub enum TextureInput {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    /// Path to the config file (if loaded from file)
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
     /// Camera device ID (index or name)
     pub input: String,
     /// Path to GLSL fragment shader file(s)
@@ -72,6 +75,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_path: None,
             input: "0".to_string(),
             shader: Vec::new(),
             width: 1920,
@@ -82,6 +86,64 @@ impl Default for Config {
             output: OutputMode::Window,
             textures: Vec::new(),
         }
+    }
+}
+
+impl Config {
+    /// Create a Config from CLI arguments.
+    /// This handles the texture ordering from interleaved --image and --video flags.
+    fn from_cli_args(args: Args) -> Self {
+        // Build ordered texture inputs from CLI image/video args
+        let matches = Args::command().get_matches();
+        let mut ordered_inputs: Vec<(usize, TextureInput)> = Vec::new();
+
+        if let Some(indices) = matches.indices_of("video") {
+            let paths: Vec<&PathBuf> = args.video.iter().collect();
+            for (i, idx) in indices.enumerate() {
+                if i < paths.len() {
+                    ordered_inputs.push((idx, TextureInput::Video { path: paths[i].clone() }));
+                }
+            }
+        }
+
+        if let Some(indices) = matches.indices_of("image") {
+            let paths: Vec<&PathBuf> = args.image.iter().collect();
+            for (i, idx) in indices.enumerate() {
+                if i < paths.len() {
+                    ordered_inputs.push((idx, TextureInput::Image { path: paths[i].clone() }));
+                }
+            }
+        }
+
+        ordered_inputs.sort_by_key(|k| k.0);
+        let textures = ordered_inputs.into_iter().map(|(_, t)| t).collect();
+
+        Self {
+            config_path: None,
+            input: args.input,
+            shader: args.shader,
+            width: args.width,
+            height: args.height,
+            max_input_width: args.max_input_width,
+            max_input_height: args.max_input_height,
+            fps: args.fps,
+            output: args.output,
+            textures,
+        }
+    }
+    
+    /// Load configuration from a YAML file.
+    pub fn from_file(path: &PathBuf) -> Result<Self> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config file {:?}: {}", path, e))?;
+        
+        let mut config: Config = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config file {:?}: {}", path, e))?;
+        
+        config.config_path = Some(path.clone());
+        info!("Loaded configuration from {:?}", path);
+        
+        Ok(config)
     }
 }
 
@@ -146,8 +208,7 @@ struct Args {
 
 /// Application state for the event loop.
 struct ProteusApp {
-    args: Args,
-    ordered_inputs: Vec<TextureInput>,
+    config: Config,
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
     capture: Option<AsyncCapture>,
@@ -163,14 +224,13 @@ struct ProteusApp {
 }
 
 impl ProteusApp {
-    fn new(args: Args, ordered_inputs: Vec<TextureInput>) -> Self {
-        let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
+    fn new(config: Config) -> Self {
+        let frame_duration = Duration::from_secs_f64(1.0 / config.fps as f64);
         
-        let config_watcher = ConfigWatcher::new(args.config.clone());
+        let config_watcher = ConfigWatcher::new(config.config_path.clone());
 
         Self {
-            args,
-            ordered_inputs,
+            config,
             window: None,
             renderer: None,
             capture: None,
@@ -187,18 +247,18 @@ impl ProteusApp {
 
     fn initialize(&mut self) -> Result<()> {
         // Initialize camera capture
-        let config = CaptureConfig {
-            device_id: self.args.input.clone(),
-            width: self.args.width,
-            height: self.args.height,
-            max_input_width: self.args.max_input_width.unwrap_or(self.args.width),
-            max_input_height: self.args.max_input_height.unwrap_or(self.args.height),
-            fps: self.args.fps,
+        let capture_config = CaptureConfig {
+            device_id: self.config.input.clone(),
+            width: self.config.width,
+            height: self.config.height,
+            max_input_width: self.config.max_input_width.unwrap_or(self.config.width),
+            max_input_height: self.config.max_input_height.unwrap_or(self.config.height),
+            fps: self.config.fps,
         };
 
-        info!("Opening camera device {}...", self.args.input);
+        info!("Opening camera device {}...", self.config.input);
         
-        if let Some(capture) = init_capture(config) {
+        if let Some(capture) = init_capture(capture_config) {
              let (cam_w, cam_h) = capture.frame_size();
              info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
              self.capture = Some(capture);
@@ -208,16 +268,13 @@ impl ProteusApp {
         }
 
         // Load shaders if provided
-        let shaders = load_shaders(&self.args.shader);
+        let shaders = load_shaders(&self.config.shader);
 
-        // Initialize shader pipeline
-        // Build texture sources from ordered inputs (up to 4 total)
-        let texture_sources = load_textures(&self.ordered_inputs);
-        
-
+        // Initialize shader pipeline with textures from config
+        let texture_sources = load_textures(&self.config.textures);
         
         let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("GPU context not initialized"))?;
-        self.pipeline = Some(WgpuPipeline::new(context, self.args.width, self.args.height, shaders, texture_sources)?);
+        self.pipeline = Some(WgpuPipeline::new(context, self.config.width, self.config.height, shaders, texture_sources)?);
         info!("Shader pipeline initialized");
 
         Ok(())
@@ -241,7 +298,7 @@ impl ProteusApp {
         let elapsed = self.fps_last_time.elapsed();
         if elapsed >= Duration::from_secs(1) {
             let fps = self.frame_count as f32 / elapsed.as_secs_f32();
-            debug!("[Perf] Rendering at {:.2} FPS (Resolution: {}x{})", fps, self.args.width, self.args.height);
+            debug!("[Perf] Rendering at {:.2} FPS (Resolution: {}x{})", fps, self.config.width, self.config.height);
             self.frame_count = 0;
             self.fps_last_time = Instant::now();
         }
@@ -300,7 +357,7 @@ impl ProteusApp {
        let texture_sources = load_textures(&config.textures);
        
        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("No GPU context"))?;
-       let pipeline = WgpuPipeline::new(context, self.args.width, self.args.height, shaders, texture_sources)?;
+       let pipeline = WgpuPipeline::new(context, self.config.width, self.config.height, shaders, texture_sources)?;
        self.pipeline = Some(pipeline);
        Ok(())
     }
@@ -315,7 +372,7 @@ impl ApplicationHandler for ProteusApp {
         // Create window
         let window_attrs = WindowAttributes::default()
             .with_title("Proteus - Shader Webcam")
-            .with_inner_size(PhysicalSize::new(self.args.width, self.args.height));
+            .with_inner_size(PhysicalSize::new(self.config.width, self.config.height));
 
         match event_loop.create_window(window_attrs) {
             Ok(window) => {
@@ -429,86 +486,28 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Load config from file or use CLI args
-    let (args, ordered_inputs) = if let Some(config_path) = &cli_args.config {
-        load_config(config_path)?
+    // Load config from file or build from CLI args
+    let config = if let Some(config_path) = &cli_args.config {
+        Config::from_file(config_path)?
     } else {
-        // Build ordered inputs from CLI args
-        let ordered_inputs = build_ordered_inputs_from_cli(&cli_args);
-        (cli_args, ordered_inputs)
+        Config::from_cli_args(cli_args)
     };
 
     info!("Starting Proteus...");
 
     // Dispatch based on output mode
-    match args.output {
-        OutputMode::Window => run_window_mode(args, ordered_inputs)?,
+    match config.output {
+        OutputMode::Window => run_window_mode(config)?,
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-        OutputMode::VirtualCamera => run_virtual_camera_mode(args, ordered_inputs)?,
+        OutputMode::VirtualCamera => run_virtual_camera_mode(config)?,
     }
 
     Ok(())
 }
 
-/// Load configuration from a YAML file and convert to Args.
-fn load_config(path: &PathBuf) -> Result<(Args, Vec<TextureInput>)> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read config file {:?}: {}", path, e))?;
-    
-    let config: Config = serde_yaml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse config file {:?}: {}", path, e))?;
-    
-    info!("Loaded configuration from {:?}", path);
-    
-    // Convert Config to Args
-    let args = Args {
-        config: Some(path.clone()),
-        input: config.input,
-        shader: config.shader,
-        width: config.width,
-        height: config.height,
-        max_input_width: config.max_input_width,
-        max_input_height: config.max_input_height,
-        fps: config.fps,
-        list_devices: false,
-        output: config.output,
-        image: Vec::new(), // Not used when loading from config
-        video: Vec::new(), // Not used when loading from config
-    };
-    
-    Ok((args, config.textures))
-}
-
-/// Build ordered texture inputs from CLI arguments.
-fn build_ordered_inputs_from_cli(args: &Args) -> Vec<TextureInput> {
-    let matches = Args::command().get_matches();
-    let mut ordered_inputs: Vec<(usize, TextureInput)> = Vec::new();
-
-    if let Some(indices) = matches.indices_of("video") {
-        let paths: Vec<&PathBuf> = args.video.iter().collect();
-        for (i, idx) in indices.enumerate() {
-            if i < paths.len() {
-                ordered_inputs.push((idx, TextureInput::Video { path: paths[i].clone() }));
-            }
-        }
-    }
-
-    if let Some(indices) = matches.indices_of("image") {
-        let paths: Vec<&PathBuf> = args.image.iter().collect();
-        for (i, idx) in indices.enumerate() {
-            if i < paths.len() {
-                ordered_inputs.push((idx, TextureInput::Image { path: paths[i].clone() }));
-            }
-        }
-    }
-
-    ordered_inputs.sort_by_key(|k| k.0);
-    ordered_inputs.into_iter().map(|(_, t)| t).collect()
-}
-
 /// Run in window output mode (default).
-fn run_window_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Result<()> {
-    let mut app = ProteusApp::new(args, ordered_inputs);
+fn run_window_mode(config: Config) -> Result<()> {
+    let mut app = ProteusApp::new(config);
 
     // Create event loop
     let event_loop = EventLoop::new()?;
@@ -522,7 +521,7 @@ fn run_window_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Result<()> 
 
 /// Run in virtual camera output mode.
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Result<()> {
+fn run_virtual_camera_mode(config: Config) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
@@ -535,49 +534,49 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Res
     })?;
 
     // Initialize camera capture (async for better performance)
-    let config = CaptureConfig {
-        device_id: args.input.clone(),
-        width: args.width,
-        height: args.height,
-        max_input_width: args.max_input_width.unwrap_or(args.width),
-        max_input_height: args.max_input_height.unwrap_or(args.height),
-        fps: args.fps,
+    let capture_config = CaptureConfig {
+        device_id: config.input.clone(),
+        width: config.width,
+        height: config.height,
+        max_input_width: config.max_input_width.unwrap_or(config.width),
+        max_input_height: config.max_input_height.unwrap_or(config.height),
+        fps: config.fps,
     };
 
-    info!("Opening camera device {}...", args.input);
-    let mut capture = Some(AsyncCapture::new(config)?);
+    info!("Opening camera device {}...", config.input);
+    let mut capture = Some(AsyncCapture::new(capture_config)?);
     info!("Camera opened successfully (async capture)");
 
     // Load shaders if provided
-    let shaders = load_shaders(&args.shader);
+    let shaders = load_shaders(&config.shader);
 
-    // Build texture sources from ordered inputs (up to 4 total)
-    let texture_sources = load_textures(&ordered_inputs);
+    // Build texture sources from config textures
+    let texture_sources = load_textures(&config.textures);
     
     // Initialize config watcher if config file is used
-    let mut config_watcher = ConfigWatcher::new(args.config.clone());
+    let mut config_watcher = ConfigWatcher::new(config.config_path.clone());
 
     // Initialize GPU Context (headless/no-window)
     let context = Arc::new(GpuContext::new(None)?);
 
-    let mut pipeline = WgpuPipeline::new(context.clone(), args.width, args.height, shaders, texture_sources)?;
+    let mut pipeline = WgpuPipeline::new(context.clone(), config.width, config.height, shaders, texture_sources)?;
     info!("Shader pipeline initialized");
 
     // Initialize virtual camera output
     let vc_config = VirtualCameraConfig {
-        width: args.width,
-        height: args.height,
-        fps: args.fps,
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
         ..Default::default()
     };
     let mut output = VirtualCameraOutput::new(vc_config)?;
     info!("Virtual camera output initialized");
 
-    let frame_duration = Duration::from_secs_f64(1.0 / args.fps as f64);
+    let frame_duration = Duration::from_secs_f64(1.0 / config.fps as f64);
     let start_time = Instant::now();
     let mut frame_count = 0u32;
     let mut fps_last_time = Instant::now();
-    info!("Starting virtual camera stream at {} fps", args.fps);
+    info!("Starting virtual camera stream at {} fps", config.fps);
 
     // Main loop
     while running.load(Ordering::SeqCst) {
@@ -596,7 +595,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<TextureInput>) -> Res
                         let new_shaders = load_shaders(&new_config.shader);
                         let new_texture_sources = load_textures(&new_config.textures);
                        
-                        match WgpuPipeline::new(context.clone(), args.width, args.height, new_shaders, new_texture_sources) {
+                        match WgpuPipeline::new(context.clone(), config.width, config.height, new_shaders, new_texture_sources) {
                            Ok(new_pipeline) => {
                                pipeline = new_pipeline;
                                info!("Pipeline reloaded successfully");
