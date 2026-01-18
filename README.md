@@ -8,6 +8,7 @@
 - 📷 **Virtual Camera Output**:
   - **Windows**: Outputs to OBS Virtual Camera (via shared memory)
   - **Linux**: Outputs to `v4l2loopback` device
+  - **macOS**: Outputs to OBS Virtual Camera (via CMIOExtension)
 - 🎨 **Custom Shaders**: Supports GLSL fragment shaders for effects (CRT, edge detection, etc.)
 - 🦀 **Pure Rust**: Built for performance and safety
 
@@ -30,6 +31,12 @@
      # or
      sudo pacman -S v4l2loopback-dkms    # Arch Linux
      ```
+
+   **macOS**:
+   - Install [OBS Studio 30+](https://obsproject.com/)
+   - Open OBS, click "Start Virtual Camera" (bottom right), then "Stop Virtual Camera"
+   - Approve the System Extension in System Settings > Privacy & Security if prompted
+   - You may need to restart your machine after approving the extension
 
 3. **Runtime Dependency**:
    - **FFmpeg**: Must be installed and available in your system PATH (`ffmpeg` command).
@@ -97,7 +104,9 @@ cargo run --release -- -s shaders/plasma.frag -s shaders/ripple.frag
 
 Displacement effects effectively "warp" the segmentation mask along with the image. This ensures that subsequent effects (like background blur) applied after a displacement shader will use the correctly distorted mask, preventing visual artifacts where the blur doesn't match the displaced subject.
 
-### Virtual Camera (Linux/Windows)
+### Virtual Camera
+
+#### Windows
 
 1. Ensure OBS Studio is installed.
 2. Run Proteus with the virtual camera output flag:
@@ -119,6 +128,21 @@ Displacement effects effectively "warp" the segmentation mask along with the ima
 3. Open your video app and select **"Proteus Camera"**.
 
 > **Note**: You may need write permissions for `/dev/video10`. If standard execution fails, try running with `sudo` or adding your user to the `video` group.
+
+#### macOS
+
+1. **Prerequisites**:
+   - Install [OBS Studio 30+](https://obsproject.com/) (required for macOS 13 Ventura or later)
+   - Open OBS, click "Start Virtual Camera", then "Stop Virtual Camera" (one-time setup)
+   - Approve the System Extension in System Settings > Privacy & Security if prompted
+   - Restart your machine if the virtual camera doesn't appear
+
+2. Run Proteus with virtual camera output:
+   ```bash
+   cargo run --release -- --output virtual-camera
+   ```
+
+3. Open your video app (FaceTime, Zoom, etc.) and select **"OBS Virtual Camera"**.
 
 ### Video & Image Textures
 

@@ -2707,11 +2707,12 @@ dependencies = [
 
 [[package]]
 name = "proteus"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytemuck",
  "clap",
+ "core-foundation 0.10.1",
  "ctrlc",
  "image",
  "libc",

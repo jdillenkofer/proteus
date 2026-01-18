@@ -4,10 +4,10 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
 use proteus::capture::{AsyncCapture, CaptureBackend, CaptureConfig, NokhwaCapture};
 use proteus::output::window_output::WindowRenderer;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use proteus::output::{OutputBackend, VirtualCameraConfig, VirtualCameraOutput};
 use proteus::shader::{ShaderSource, TextureSlot, WgpuPipeline};
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use proteus::shader::ShaderPipeline;
 use proteus::shader::gpu_context::GpuContext;
 use proteus::video::VideoPlayer;
@@ -30,7 +30,8 @@ pub enum OutputMode {
     /// Output to virtual camera
     /// - Windows: Requires OBS Virtual Camera
     /// - Linux: Requires v4l2loopback
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    /// - macOS: Requires OBS 30+ Virtual Camera
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     VirtualCamera,
 }
 
@@ -340,7 +341,7 @@ fn main() -> Result<()> {
     // Dispatch based on output mode
     match args.output {
         OutputMode::Window => run_window_mode(args)?,
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         OutputMode::VirtualCamera => run_virtual_camera_mode(args)?,
     }
 
@@ -400,7 +401,7 @@ enum TextureInputType {
 }
 
 /// Run in virtual camera output mode.
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn run_virtual_camera_mode(args: Args) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;

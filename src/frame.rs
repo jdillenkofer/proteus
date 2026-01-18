@@ -9,8 +9,10 @@ pub enum PixelFormat {
     Rgb,
     /// RGBA with 8 bits per channel (32 bits per pixel)
     Rgba,
-    /// YUV 4:2:2 packed format
+    /// YUV 4:2:2 packed format (Y0 U0 Y1 V0)
     Yuyv,
+    /// YUV 4:2:2 packed format (U0 Y0 V0 Y1) - used by macOS
+    Uyvy,
     /// NV12 semi-planar format (Y plane + interleaved UV)
     Nv12,
 }
@@ -23,6 +25,7 @@ impl PixelFormat {
             PixelFormat::Rgb => 3,
             PixelFormat::Rgba => 4,
             PixelFormat::Yuyv => 2,
+            PixelFormat::Uyvy => 2,
             PixelFormat::Nv12 => 1, // Y plane only
         }
     }
@@ -164,6 +167,29 @@ impl VideoFrame {
                     }
                 }
             }
+            PixelFormat::Uyvy => {
+                // UYVY: U0 Y0 V0 Y1 (2 pixels packed in 4 bytes)
+                for i in 0..(pixel_count / 2) {
+                    let u = self.data[i * 4] as f32 - 128.0;
+                    let y0 = self.data[i * 4 + 1] as f32;
+                    let v = self.data[i * 4 + 2] as f32 - 128.0;
+                    let y1 = self.data[i * 4 + 3] as f32;
+
+                    // First pixel
+                    let idx = i * 2 * 4;
+                    rgba_data[idx] = (y0 + 1.402 * v).clamp(0.0, 255.0) as u8;
+                    rgba_data[idx + 1] = (y0 - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
+                    rgba_data[idx + 2] = (y0 + 1.772 * u).clamp(0.0, 255.0) as u8;
+                    rgba_data[idx + 3] = 255;
+
+                    // Second pixel
+                    let idx = (i * 2 + 1) * 4;
+                    rgba_data[idx] = (y1 + 1.402 * v).clamp(0.0, 255.0) as u8;
+                    rgba_data[idx + 1] = (y1 - 0.344 * u - 0.714 * v).clamp(0.0, 255.0) as u8;
+                    rgba_data[idx + 2] = (y1 + 1.772 * u).clamp(0.0, 255.0) as u8;
+                    rgba_data[idx + 3] = 255;
+                }
+            }
             PixelFormat::Rgba => unreachable!(),
         }
 
@@ -293,6 +319,57 @@ impl VideoFrame {
             format: PixelFormat::Yuyv,
             timestamp_us: self.timestamp_us,
             data: yuyv_data,
+        }
+    }
+
+    /// Converts this frame to UYVY format (YUV 4:2:2 packed).
+    /// UYVY is U0 Y0 V0 Y1 (2 pixels packed in 4 bytes).
+    /// This format is used by macOS virtual camera (kCVPixelFormatType_422YpCbCr8).
+    pub fn to_uyvy(&self) -> VideoFrame {
+        let rgba = self.to_rgba();
+        let pixel_count = (self.width as usize) * (self.height as usize);
+        let mut uyvy_data = vec![0u8; pixel_count * 2];
+
+        for i in 0..(pixel_count / 2) {
+            // Read 2 pixels (RGBA)
+            let idx1 = i * 2 * 4;
+            let idx2 = (i * 2 + 1) * 4;
+
+            let r1 = rgba.data[idx1] as f32;
+            let g1 = rgba.data[idx1 + 1] as f32;
+            let b1 = rgba.data[idx1 + 2] as f32;
+
+            let r2 = rgba.data[idx2] as f32;
+            let g2 = rgba.data[idx2 + 1] as f32;
+            let b2 = rgba.data[idx2 + 2] as f32;
+
+            // Convert to YUV
+            let y1 = (0.299 * r1 + 0.587 * g1 + 0.114 * b1).clamp(0.0, 255.0);
+            let y2 = (0.299 * r2 + 0.587 * g2 + 0.114 * b2).clamp(0.0, 255.0);
+
+            // Average U and V for the two pixels
+            let u1 = -0.169 * r1 - 0.331 * g1 + 0.500 * b1 + 128.0;
+            let v1 = 0.500 * r1 - 0.419 * g1 - 0.081 * b1 + 128.0;
+            let u2 = -0.169 * r2 - 0.331 * g2 + 0.500 * b2 + 128.0;
+            let v2 = 0.500 * r2 - 0.419 * g2 - 0.081 * b2 + 128.0;
+
+            let u = ((u1 + u2) / 2.0).clamp(0.0, 255.0);
+            let v = ((v1 + v2) / 2.0).clamp(0.0, 255.0);
+
+            // UYVY byte order: U0 Y0 V0 Y1
+            let out_idx = i * 4;
+            uyvy_data[out_idx] = u as u8;
+            uyvy_data[out_idx + 1] = y1 as u8;
+            uyvy_data[out_idx + 2] = v as u8;
+            uyvy_data[out_idx + 3] = y2 as u8;
+        }
+
+        VideoFrame {
+            width: self.width,
+            height: self.height,
+            format: PixelFormat::Uyvy,
+            timestamp_us: self.timestamp_us,
+            data: uyvy_data,
         }
     }
 }
