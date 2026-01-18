@@ -92,16 +92,23 @@ impl VideoFrame {
         let rgba = self.to_rgba();
         let conv_elapsed = conv_start.elapsed();
 
-        // Use image crate to resize
+        // Use fast_image_resize (SIMD optimized) for resizing
         let resize_start = std::time::Instant::now();
-        let img = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.data)
-            .expect("Failed to create image from frame data");
-        let resized = image::imageops::resize(
-            &img,
-            new_width,
-            new_height,
-            image::imageops::FilterType::Nearest,
-        );
+        
+        use fast_image_resize::{images::Image, Resizer, PixelType};
+        
+        let src_image = Image::from_vec_u8(
+            rgba.width,
+            rgba.height,
+            rgba.data,
+            PixelType::U8x4,
+        ).expect("Failed to create source image");
+        
+        let mut dst_image = Image::new(new_width, new_height, PixelType::U8x4);
+        
+        let mut resizer = Resizer::new();
+        resizer.resize(&src_image, &mut dst_image, None).expect("Resize failed");
+        
         let resize_elapsed = resize_start.elapsed();
 
         tracing::debug!("    [Perf] scale_to_fit (with resize) to_rgba: {:?}, resize: {:?}", conv_elapsed, resize_elapsed);
@@ -111,7 +118,7 @@ impl VideoFrame {
             height: new_height,
             format: PixelFormat::Rgba,
             timestamp_us: self.timestamp_us,
-            data: resized.into_raw(),
+            data: dst_image.into_vec(),
         }
     }
 
@@ -128,11 +135,12 @@ impl VideoFrame {
 
         // Fast path for RGB -> RGBA: just add alpha=255, no color conversion needed
         if self.format == PixelFormat::Rgb {
-            for i in 0..pixel_count {
-                rgba_data[i * 4] = self.data[i * 3];
-                rgba_data[i * 4 + 1] = self.data[i * 3 + 1];
-                rgba_data[i * 4 + 2] = self.data[i * 3 + 2];
-                rgba_data[i * 4 + 3] = 255;
+            // Use chunks for better auto-vectorization
+            for (rgb, rgba) in self.data.chunks_exact(3).zip(rgba_data.chunks_exact_mut(4)) {
+                rgba[0] = rgb[0];
+                rgba[1] = rgb[1];
+                rgba[2] = rgb[2];
+                rgba[3] = 255;
             }
             return VideoFrame {
                 width: self.width,
