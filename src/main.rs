@@ -694,6 +694,7 @@ fn run_virtual_camera_mode(args: Args, ordered_inputs: Vec<(TextureInputType, Pa
                             width: new_config.width,
                             height: new_config.height,
                             fps: new_config.fps,
+                            ..Default::default()
                         };
                         
                         match VirtualCameraOutput::new(vc_config) {
