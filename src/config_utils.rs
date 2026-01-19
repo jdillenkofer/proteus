@@ -2,6 +2,7 @@ use crate::Config;
 use proteus::capture::{AsyncCapture, CaptureConfig};
 use proteus::shader::{ShaderSource, TextureSlot};
 use proteus::video::VideoPlayer;
+use proteus::lua_canvas::LuaCanvas;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -134,8 +135,8 @@ pub fn load_shaders(paths: &[PathBuf]) -> Vec<ShaderSource> {
     shaders
 }
 
-/// Helper to load texture sources from TextureInput list.
-pub fn load_textures(inputs: &[crate::TextureInput]) -> Vec<TextureSlot> {
+/// Helper to load texture sources from TextureInput list with specified canvas size.
+pub fn load_textures_with_size(inputs: &[crate::TextureInput], width: u32, height: u32) -> Vec<TextureSlot> {
     let mut texture_sources = Vec::new();
     for input in inputs {
         if texture_sources.len() >= 4 { break; }
@@ -151,6 +152,15 @@ pub fn load_textures(inputs: &[crate::TextureInput]) -> Vec<TextureSlot> {
             },
             crate::TextureInput::Image { path } => {
                 texture_sources.push(TextureSlot::Image(path.clone()));
+            },
+            crate::TextureInput::Lua { path } => {
+                match LuaCanvas::new(path, width, height) {
+                    Ok(canvas) => texture_sources.push(TextureSlot::LuaCanvas(canvas)),
+                    Err(e) => {
+                        error!("Failed to create Lua canvas {:?}: {}", path, e);
+                        texture_sources.push(TextureSlot::Empty);
+                    }
+                }
             }
         }
     }

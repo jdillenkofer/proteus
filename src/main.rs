@@ -2,7 +2,7 @@
 
 mod config_utils;
 mod utils;
-use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures, init_capture};
+use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures_with_size, init_capture};
 use utils::FpsCounter;
 
 use anyhow::Result;
@@ -45,6 +45,7 @@ pub enum OutputMode {
 pub enum TextureInput {
     Image { path: PathBuf },
     Video { path: PathBuf },
+    Lua { path: PathBuf },
 }
 
 /// Configuration file structure.
@@ -113,6 +114,15 @@ impl Config {
             for (i, idx) in indices.enumerate() {
                 if i < paths.len() {
                     ordered_inputs.push((idx, TextureInput::Image { path: paths[i].clone() }));
+                }
+            }
+        }
+
+        if let Some(indices) = matches.indices_of("lua") {
+            let paths: Vec<&PathBuf> = args.lua.iter().collect();
+            for (i, idx) in indices.enumerate() {
+                if i < paths.len() {
+                    ordered_inputs.push((idx, TextureInput::Lua { path: paths[i].clone() }));
                 }
             }
         }
@@ -199,13 +209,17 @@ struct Args {
     #[arg(long, value_enum, default_value = "window")]
     output: OutputMode,
 
-    /// Path to image file(s) for shader use (up to 4 total with videos, black if not provided)
+    /// Path to image file(s) for shader use (up to 4 total with videos/lua, black if not provided)
     #[arg(long, num_args = 0..=4)]
     image: Vec<PathBuf>,
 
-    /// Path to video file(s) for shader use (up to 4 total with images)
+    /// Path to video file(s) for shader use (up to 4 total with images/lua)
     #[arg(long, num_args = 0..=4)]
     video: Vec<PathBuf>,
+
+    /// Path to Lua script(s) for dynamic texture generation (up to 4 total with images/videos)
+    #[arg(long, num_args = 0..=4)]
+    lua: Vec<PathBuf>,
 }
 
 /// Application state for the event loop.
@@ -271,7 +285,7 @@ impl ProteusApp {
         let shaders = load_shaders(&self.config.shader);
 
         // Initialize shader pipeline with textures from config
-        let texture_sources = load_textures(&self.config.textures);
+        let texture_sources = load_textures_with_size(&self.config.textures, self.config.width, self.config.height);
         
         let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("GPU context not initialized"))?;
         self.pipeline = Some(WgpuPipeline::new(context, self.config.width, self.config.height, shaders, texture_sources)?);
@@ -349,7 +363,7 @@ impl ProteusApp {
 
     fn rebuild_pipeline(&mut self, config: &Config) -> Result<()> {
        let shaders = load_shaders(&config.shader);
-       let texture_sources = load_textures(&config.textures);
+       let texture_sources = load_textures_with_size(&config.textures, self.config.width, self.config.height);
        
        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("No GPU context"))?;
        let pipeline = WgpuPipeline::new(context, self.config.width, self.config.height, shaders, texture_sources)?;
@@ -546,7 +560,7 @@ fn run_virtual_camera_mode(config: Config) -> Result<()> {
     let shaders = load_shaders(&config.shader);
 
     // Build texture sources from config textures
-    let texture_sources = load_textures(&config.textures);
+    let texture_sources = load_textures_with_size(&config.textures, config.width, config.height);
     
     // Initialize config watcher if config file is used
     let mut config_watcher = ConfigWatcher::new(config.config_path.clone());
@@ -587,7 +601,7 @@ fn run_virtual_camera_mode(config: Config) -> Result<()> {
                     if diff.needs_pipeline_reload() {
                         info!("Reloading pipeline due to shader/texture changes...");
                         let new_shaders = load_shaders(&new_config.shader);
-                        let new_texture_sources = load_textures(&new_config.textures);
+                        let new_texture_sources = load_textures_with_size(&new_config.textures, config.width, config.height);
                        
                         match WgpuPipeline::new(context.clone(), config.width, config.height, new_shaders, new_texture_sources) {
                            Ok(new_pipeline) => {

@@ -8,3 +8,4 @@ pub mod output;
 pub mod shader;
 pub mod ml;
 pub mod video;
+pub mod lua_canvas;

@@ -192,6 +192,119 @@ cargo run --release -- --video "https://www.twitch.tv/shroud"
 ```
 Proteus will automatically resolve the stream using `streamlink` and pipe it to `ffmpeg`.
 
+### Lua Canvas (Dynamic Textures)
+
+Lua scripts can generate dynamic textures in real-time using CPU-based 2D rendering. These are useful for procedural animations, particle effects, or interactive visualizations that get composited with your camera feed via shaders.
+
+**Requirements**:
+- A Lua script that follows the required module structure (see below)
+
+**Configuration File Usage**:
+```yaml
+textures:
+  - type: lua
+    path: lua/bounce_circle.lua
+```
+
+#### Script Structure
+
+Lua scripts must return a module table with a `new()` constructor. The canvas runtime calls these lifecycle methods:
+
+| Method | Arguments | Description |
+|--------|-----------|-------------|
+| `M.new()` | — | **Required.** Constructor that returns a new instance |
+| `M:init(w, h)` | width, height | Called once when the canvas is created |
+| `M:update(dt)` | delta time (seconds) | Called every frame for state updates |
+| `M:draw()` | — | Called every frame to render using the canvas API |
+| `M:save_state()` | — | Optional. Returns a table to preserve state across hot reloads |
+| `M:load_state(state)` | saved state table | Optional. Restores state after hot reload |
+
+**Minimal Example** (`lua/bounce_circle.lua`):
+```lua
+local M = {}
+M.__index = M
+
+function M.new()
+    return setmetatable({ x = 100, y = 100, vx = 200, vy = 150, t = 0 }, M)
+end
+
+function M:init(w, h)
+    self.w, self.h = w, h
+end
+
+function M:update(dt)
+    self.t = self.t + dt
+    self.x = self.x + self.vx * dt
+    self.y = self.y + self.vy * dt
+    
+    -- Bounce off walls
+    if self.x < 50 or self.x > self.w - 50 then self.vx = -self.vx end
+    if self.y < 50 or self.y > self.h - 50 then self.vy = -self.vy end
+end
+
+function M:draw()
+    canvas.clear(20, 20, 30, 255)
+    local r = math.floor(128 + 127 * math.sin(self.t * 2))
+    canvas.fill_circle(self.x, self.y, 50, r, 100, 200, 255)
+end
+
+return M
+```
+
+#### Canvas Drawing API
+
+The global `canvas` table provides these drawing functions. All colors are RGBA (0-255).
+
+**Shape Drawing:**
+
+| Function | Description |
+|----------|-------------|
+| `canvas.clear(r, g, b, a)` | Fill entire canvas with a solid color |
+| `canvas.fill_rect(x, y, w, h, r, g, b, a)` | Draw a filled rectangle |
+| `canvas.stroke_rect(x, y, w, h, r, g, b, a, stroke_width)` | Draw a rectangle outline |
+| `canvas.fill_circle(cx, cy, radius, r, g, b, a)` | Draw a filled circle |
+| `canvas.stroke_circle(cx, cy, radius, r, g, b, a, stroke_width)` | Draw a circle outline |
+| `canvas.draw_line(x1, y1, x2, y2, r, g, b, a, stroke_width)` | Draw a line segment |
+| `canvas.push_clip(x, y, w, h)` | Set a clipping rectangle (subsequent draws are masked) |
+| `canvas.pop_clip()` | Clear the clipping rectangle |
+
+**Text Rendering:**
+
+| Function | Description |
+|----------|-------------|
+| `canvas.draw_text(x, y, text, size, r, g, b, a)` | Draw text at position with default system font |
+| `canvas.draw_text_font(x, y, text, font_family, size, r, g, b, a)` | Draw text with specific font family |
+| `canvas.measure_text(text, size)` | Returns `width, height` of text with default font |
+| `canvas.measure_text_font(text, font_family, size)` | Returns `width, height` with specific font |
+| `canvas.list_fonts()` | Returns array of available system font family names |
+
+**Canvas Properties**:
+- `canvas.width` — Canvas width in pixels
+- `canvas.height` — Canvas height in pixels
+
+#### Hot Reloading
+
+Lua scripts are automatically watched for changes. When you save your script:
+
+1. **State preservation**: If your script implements `save_state()`, its return value is captured
+2. **Script reload**: The new code is loaded and a fresh instance is created via `new()`
+3. **State restoration**: If the new script implements `load_state(state)`, the saved state is passed in
+
+This enables live-coding workflows where you can tweak animations without restarting Proteus.
+
+#### Using with Shaders
+
+Lua canvases are bound to texture slots just like images and videos. Access them in shaders via `t_image0`, `t_image1`, etc.
+
+```yaml
+textures:
+  - type: lua
+    path: lua/particle_system.lua    # Bound to t_image0
+
+shader:
+  - shaders/background_image.frag   # Can sample t_image0
+```
+
 ## Configuration Options
 
 | Option | Description | Default |
@@ -205,7 +318,8 @@ Proteus will automatically resolve the stream using `streamlink` and pipe it to 
 | `--fps <FPS>` | Target frames per second | 30 |
 | `--output <MODE>` | `window` or `virtual-camera` | window |
 | `--image <PATH>` | Load image into next available texture slot | - |
-| `--video <PATH>` | Load video into next available texture slot| - |
+| `--video <PATH>` | Load video into next available texture slot | - |
+| `--lua <PATH>` | Load Lua script into next available texture slot | - |
 | `--list-devices` | List available cameras | - |
 | `--config <PATH>` | Load configuration from a YAML file | - |
 

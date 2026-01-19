@@ -3,6 +3,7 @@
 use super::{ShaderPipeline, ShaderSource};
 use crate::frame::{PixelFormat, QuadVertex, VideoFrame};
 use crate::video::VideoPlayer;
+use crate::lua_canvas::LuaCanvas;
 use anyhow::{anyhow, Result};
 use naga::front::glsl::{Frontend, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -16,12 +17,14 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use crate::shader::gpu_context::GpuContext;
 
-/// Source for a texture slot - either a static image or a video.
+/// Source for a texture slot - either a static image, video, or Lua canvas.
 pub enum TextureSlot {
     /// Path to a static image file
     Image(std::path::PathBuf),
     /// Video player for dynamic frames
     Video(VideoPlayer),
+    /// Lua canvas for dynamic texture generation
+    LuaCanvas(LuaCanvas),
     /// Empty slot (will use 1x1 black texture)
     Empty,
 }
@@ -89,6 +92,10 @@ pub struct WgpuPipeline {
     video_players: Vec<VideoPlayer>,
     /// Which texture slots are videos (index into video_players)
     video_slot_map: [Option<usize>; 4],
+    /// Lua canvases for dynamic texture generation
+    lua_canvases: Vec<LuaCanvas>,
+    /// Which texture slots are Lua canvases (index into lua_canvases)
+    lua_slot_map: [Option<usize>; 4],
 
     // Performance Cache
     input_texture: Option<wgpu::Texture>,
@@ -431,9 +438,11 @@ impl WgpuPipeline {
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
 
-        // Process texture sources (videos, images, or empty)
+        // Process texture sources (videos, images, lua canvases, or empty)
         let mut video_players: Vec<VideoPlayer> = Vec::new();
         let mut video_slot_map: [Option<usize>; 4] = [None; 4];
+        let mut lua_canvases: Vec<LuaCanvas> = Vec::new();
+        let mut lua_slot_map: [Option<usize>; 4] = [None; 4];
         let mut loaded_textures: Vec<Option<wgpu::Texture>> = vec![None; 4];
         
         for (i, source) in texture_sources.into_iter().enumerate() {
@@ -472,6 +481,11 @@ impl WgpuPipeline {
                     info!("Video slot {} ({}x{})", i, player.width, player.height);
                     video_slot_map[i] = Some(video_players.len());
                     video_players.push(player);
+                }
+                TextureSlot::LuaCanvas(canvas) => {
+                    info!("Lua canvas slot {} ({}x{})", i, canvas.width, canvas.height);
+                    lua_slot_map[i] = Some(lua_canvases.len());
+                    lua_canvases.push(canvas);
                 }
                 TextureSlot::Empty => {}
             }
@@ -525,6 +539,8 @@ impl WgpuPipeline {
             _current_video_texture_sizes: [None; 4],
             video_players,
             video_slot_map,
+            lua_canvases,
+            lua_slot_map,
             input_texture: None,
             output_textures: Vec::new(),
             readback_buffer: None,
@@ -1033,6 +1049,51 @@ impl WgpuPipeline {
                     }
 
                     // Upload video frame to texture
+                    self.context.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { 
+                            texture: &self.image_textures[slot_index],  
+                            mip_level: 0, 
+                            origin: wgpu::Origin3d::ZERO, 
+                            aspect: wgpu::TextureAspect::All 
+                        },
+                        &frame.data,
+                        wgpu::TexelCopyBufferLayout { 
+                            offset: 0, 
+                            bytes_per_row: Some(frame.width * 4), 
+                            rows_per_image: Some(frame.height) 
+                        },
+                        wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
+                    );
+                }
+            }
+        }
+
+        // 6. Update Lua canvas textures with current frames
+        for (slot_index, canvas_index) in self.lua_slot_map.iter().enumerate() {
+            if let Some(canvas_idx) = canvas_index {
+                if let Some(frame) = self.lua_canvases[*canvas_idx].get_frame(time) {
+                    let current_texture = &self.image_textures[slot_index];
+                    
+                    // Check if texture needs resizing
+                    if current_texture.width() != frame.width || current_texture.height() != frame.height {
+                        info!("Resizing Lua canvas texture slot {} to {}x{}", slot_index, frame.width, frame.height);
+                        
+                        let new_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some(&format!("Lua Canvas Texture {}", slot_index)),
+                            size: wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        
+                        self.image_textures[slot_index] = new_texture;
+                        bind_groups_need_update = true;
+                    }
+
+                    // Upload Lua canvas frame to texture
                     self.context.queue.write_texture(
                         wgpu::TexelCopyTextureInfo { 
                             texture: &self.image_textures[slot_index],  
