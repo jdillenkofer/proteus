@@ -1,6 +1,6 @@
 [package]
 name = "proteus"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Cross-platform shader webcam transformer"
 
@@ -31,6 +31,10 @@ ndarray = "0.15"
 notify = "8.2.0"
 url = "2.5.8"
 ezk-image = "0.3.0"
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
+tiny-skia = "0.11"
+fontdb = "0.22"
+ab_glyph = "0.2"
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
