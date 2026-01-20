@@ -13,7 +13,6 @@ layout(set=0, binding=3) uniform texture2D t_mask; // Unused for this global eff
 layout(location=0) in vec2 v_tex_coords;
 layout(location=0) out vec4 f_color;
 
-// Game Boy Palette
 const vec3 C0 = vec3(15, 56, 15) / 255.0;   // Darkest
 const vec3 C1 = vec3(48, 98, 48) / 255.0;   // Dark
 const vec3 C2 = vec3(139, 172, 15) / 255.0; // Light
@@ -21,7 +20,6 @@ const vec3 C3 = vec3(155, 188, 15) / 255.0; // Lightest
 
 void main() {
     // Pixelation Logic
-    // Original Game Boy resolution: 160x144
     float pixel_scale = 4.0; // Scale factor to make pixels visible on HD
     vec2 res = vec2(width, height) / pixel_scale;
     
