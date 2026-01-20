@@ -1,5 +1,5 @@
 -- Chamber 10: Teleporter
--- Instant portal transitions with simplified visuals
+-- Instant portal transitions with simplified visuals (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -11,6 +11,7 @@ function M.new()
         portals = {},
         t = 0,
         cooldowns = {},
+        scale = 1,
     }, M)
 end
 
@@ -20,7 +21,13 @@ function M:init(w, h)
     self.t = 0
     self.cooldowns = {}
     
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
     self.portals = {}
+    
+    -- Proportional portal radius (about 4.5% of smaller dimension)
+    local portal_radius = math.min(w, h) * 0.045
     
     local num_pairs = math.random(2, 3)
     local pair_colors = {
@@ -37,23 +44,23 @@ function M:init(w, h)
         local pair_attempts = 0
         while #pair < 2 and pair_attempts < 100 do
             pair_attempts = pair_attempts + 1
-            local radius = 22
-            local x = math.random(radius + 15, w - radius - 15)
-            local y = math.random(math.floor(h * 0.1), math.floor(h * 0.9))
+            local margin = math.min(w, h) * 0.03
+            local x = portal_radius + margin + math.random() * (w - 2 * (portal_radius + margin))
+            local y = h * 0.1 + math.random() * (h * 0.8)
             
             -- Check overlap with ALL portals (including current pair)
             local o = false
             for _, existing in ipairs(self.portals) do
                 local d = math.sqrt((x - existing.x)^2 + (y - existing.y)^2)
-                if d < (radius * 4) then o = true break end
+                if d < (portal_radius * 4) then o = true break end
             end
             for _, existing in ipairs(pair) do
                 local d = math.sqrt((x - existing.x)^2 + (y - existing.y)^2)
-                if d < (radius * 4) then o = true break end
+                if d < (portal_radius * 4) then o = true break end
             end
             
             if not o then
-                table.insert(pair, { x = x, y = y, radius = radius, color = color_pair[#pair + 1] })
+                table.insert(pair, { x = x, y = y, radius = portal_radius, color = color_pair[#pair + 1] })
             end
         end
         
@@ -120,6 +127,9 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local rim_width = math.max(2, math.floor(3 * self.scale))
+    local orbit_size = math.max(2, math.floor(4 * self.scale))
+    
     for i, p in ipairs(self.portals) do
         local r, g, b = table.unpack(p.color)
         
@@ -131,7 +141,7 @@ function M:draw(ox, oy, w, h)
         canvas.fill_circle(ox + p.x, oy + p.y, p.radius, 10, 10, 20, 255)
         
         -- Sharp Rim
-        canvas.stroke_circle(ox + p.x, oy + p.y, p.radius, r, g, b, 255, 3)
+        canvas.stroke_circle(ox + p.x, oy + p.y, p.radius, r, g, b, 255, rim_width)
         canvas.stroke_circle(ox + p.x, oy + p.y, p.radius + 2, 255, 255, 255, 100, 1)
         
         -- Subtle energy orbit (constant speed, no pulses)
@@ -140,7 +150,7 @@ function M:draw(ox, oy, w, h)
             local angle = rot + j * math.pi
             local ex = ox + p.x + math.cos(angle) * (p.radius + 3)
             local ey = oy + p.y + math.sin(angle) * (p.radius + 3)
-            canvas.fill_circle(ex, ey, 4, 255, 255, 255, 180)
+            canvas.fill_circle(ex, ey, orbit_size, 255, 255, 255, 180)
         end
     end
 end

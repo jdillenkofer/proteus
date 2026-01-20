@@ -1,5 +1,5 @@
 -- Chamber 3: Funnel
--- Angled walls forming a funnel shape
+-- Angled walls forming a funnel shape (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -12,6 +12,7 @@ function M.new()
         h = 0,
         walls = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -19,6 +20,9 @@ function M:init(w, h)
     self.w = w
     self.h = h
     self.t = 0
+    
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
     
     -- Define walls as line segments
     self.walls = {
@@ -57,7 +61,8 @@ function M:update(dt, balls)
                 ball.x, ball.y, wall.x1, wall.y1, wall.x2, wall.y2
             )
             
-            if dist < ball.radius + 4 then
+            local wall_thick = math.max(2, math.floor(4 * self.scale))
+            if dist < ball.radius + wall_thick then
                 local nx = ball.x - proj_x
                 local ny = ball.y - proj_y
                 local len = math.sqrt(nx * nx + ny * ny)
@@ -68,7 +73,7 @@ function M:update(dt, balls)
                 end
                 
                 -- Separate
-                local overlap = ball.radius + 4 - dist
+                local overlap = ball.radius + wall_thick - dist
                 ball.x = ball.x + nx * overlap
                 ball.y = ball.y + ny * overlap
                 
@@ -84,12 +89,14 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local line_width = math.max(4, math.floor(8 * self.scale))
+    
     -- Draw funnel walls
     for _, wall in ipairs(self.walls) do
         canvas.draw_line(
             ox + wall.x1, oy + wall.y1,
             ox + wall.x2, oy + wall.y2,
-            90, 70, 110, 255, 8
+            90, 70, 110, 255, line_width
         )
     end
 end

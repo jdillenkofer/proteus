@@ -1,5 +1,5 @@
 -- Chamber 6: Splitter
--- A wedge that splits balls to left or right sides
+-- A wedge that splits balls to left or right sides (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         wedge = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -17,6 +18,9 @@ function M:init(w, h)
     self.w = w
     self.h = h
     self.t = 0
+    
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
     
     -- Randomize wedge shape
     local top_x = w * (0.5 + 0.1 * math.random()) -- 0.4 to 0.6
@@ -83,7 +87,7 @@ function M:update(dt, balls)
             local proj_y = wall.y1 + t * dy
             
             local dist_sq = (ball.x - proj_x)^2 + (ball.y - proj_y)^2
-            local min_dist = ball.radius + 5
+            local min_dist = ball.radius + math.max(2, math.floor(5 * self.scale))
             
             if dist_sq < min_dist * min_dist then
                 local dist = math.sqrt(dist_sq)
@@ -125,13 +129,15 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local line_width = math.max(5, math.floor(10 * self.scale))
+    
     -- Draw wedge
     local top = self.wedge.top
     local left = self.wedge.left
     local right = self.wedge.right
     
-    canvas.draw_line(ox + top.x, oy + top.y, ox + left.x, oy + left.y, 100, 200, 150, 255, 10)
-    canvas.draw_line(ox + top.x, oy + top.y, ox + right.x, oy + right.y, 100, 200, 150, 255, 10)
+    canvas.draw_line(ox + top.x, oy + top.y, ox + left.x, oy + left.y, 100, 200, 150, 255, line_width)
+    canvas.draw_line(ox + top.x, oy + top.y, ox + right.x, oy + right.y, 100, 200, 150, 255, line_width)
 end
 
 function M:save_state()

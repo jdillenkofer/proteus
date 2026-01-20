@@ -2,9 +2,18 @@
 -- Renders multiple chambers in a tiled layout
 -- Balls use GLOBAL coordinates and can overlap multiple chambers
 -- Both chambers affect physics when ball overlaps their boundary
+-- Resolution-independent: all chambers scale proportionally
 
 local M = {}
 M.__index = M
+
+-- Reference resolution for scaling (design resolution)
+local REF_WIDTH = 1920
+local REF_HEIGHT = 1080
+
+-- Fixed grid layout - always the same number of chambers (4x4 = 16 chambers)
+local FIXED_COLS = 4
+local FIXED_ROWS = 4
 
 function M.new()
     return setmetatable({
@@ -13,18 +22,23 @@ function M.new()
         t = 0,
         w = 1920,
         h = 1080,
-        cols = 3,
-        rows = 1,
+        cols = FIXED_COLS,
+        rows = FIXED_ROWS,
         next_ball_id = 1,
         spawn_timer = 0,
         spawn_interval = 0.5,
         max_balls = 50,
+        scale = 1.0,  -- Global scale factor for resolution independence
     }, M)
 end
 
 function M:init(w, h)
     self.w = w
     self.h = h
+    
+    -- Calculate scale factor based on resolution
+    -- Use the smaller scale to ensure everything fits
+    self.scale = math.min(w / REF_WIDTH, h / REF_HEIGHT)
     
     self:load_chambers()
     self:layout_chambers()
@@ -56,12 +70,16 @@ function M:spawn_random_ball()
     local chamber = top_chambers[math.random(1, #top_chambers)]
     local vp = chamber.viewport
     
-    -- Random GLOBAL position within chamber
-    local gx = vp.x + math.random(30, math.floor(vp.w - 30))
-    local gy = vp.y + math.random(30, 80)
+    -- Random GLOBAL position within chamber (ensure integer positions)
+    -- Scale spawn margins proportionally
+    local margin = math.floor(vp.w * 0.1)
+    local gx = math.floor(vp.x) + math.random(margin, math.max(margin + 1, math.floor(vp.w - margin)))
+    local gy = math.floor(vp.y) + math.random(margin, math.max(margin + 1, math.floor(vp.h * 0.15)))
     
-    local vx = math.random(-100, 100)
-    local vy = math.random(0, 50)
+    -- Scale velocities proportionally to resolution
+    local vel_scale = self.scale
+    local vx = math.random(-100, 100) * vel_scale
+    local vy = math.random(0, 50) * vel_scale
     
     local colors = {
         {220, 80, 80},
@@ -72,13 +90,17 @@ function M:spawn_random_ball()
     }
     local color = colors[math.random(1, #colors)]
     
+    -- Scale ball radius based on chamber size (proportional to smallest dimension)
+    local base_radius = math.min(vp.w, vp.h) * 0.03
+    base_radius = math.max(6, math.min(20, base_radius))  -- Clamp between 6 and 20
+    
     local ball = {
         id = self.next_ball_id,
         x = gx,  -- GLOBAL coordinates
         y = gy,
         vx = vx,
         vy = vy,
-        radius = 10,
+        radius = base_radius,
         color = color,
         active = true,
     }
@@ -105,21 +127,14 @@ function M:get_overlapping_chambers(ball)
     return overlapping
 end
 
--- Layout chambers in a grid
+-- Layout chambers in a grid (fixed layout regardless of resolution)
 function M:layout_chambers()
     local num = #self.chambers
     if num == 0 then return end
     
-    if num <= 3 then
-        self.cols = num
-        self.rows = 1
-    elseif num <= 6 then
-        self.cols = 3
-        self.rows = 2
-    else
-        self.cols = 4
-        self.rows = math.ceil(num / 4)
-    end
+    -- Always use fixed grid layout for consistency across resolutions
+    self.cols = FIXED_COLS
+    self.rows = FIXED_ROWS
     
     local cell_w = self.w / self.cols
     local cell_h = self.h / self.rows

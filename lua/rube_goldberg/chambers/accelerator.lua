@@ -1,5 +1,5 @@
 -- Chamber 8: Accelerator
--- Speed boost zones
+-- Speed boost zones (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         boosters = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -17,6 +18,9 @@ function M:init(w, h)
     self.w = w
     self.h = h
     self.t = 0
+    
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
     
     self.boosters = {}
     
@@ -29,19 +33,24 @@ function M:init(w, h)
         while not placed and attempts < max_attempts do
             attempts = attempts + 1
             
-            -- Random size
-            local bw = math.random(40, math.floor(w * 0.3))
-            local bh = math.random(40, math.floor(h * 0.3))
+            -- Proportional size (20-30% of chamber dimensions)
+            local bw = w * (0.15 + math.random() * 0.15)
+            local bh = h * (0.15 + math.random() * 0.15)
             
-            -- Random position (keep somewhat away from edges)
-            local bx = math.random(math.floor(w * 0.1), math.floor(w * 0.9 - bw))
-            local by = math.random(math.floor(h * 0.1), math.floor(h * 0.9 - bh))
+            -- Proportional position (10-90% range)
+            local bx = w * (0.1 + math.random() * 0.7)
+            local by = h * (0.1 + math.random() * 0.7)
             
-            -- Check overlap with existing boosters
+            -- Ensure within bounds
+            if bx + bw > w * 0.9 then bx = w * 0.9 - bw end
+            if by + bh > h * 0.9 then by = h * 0.9 - bh end
+            
+            -- Check overlap with existing boosters (proportional margin)
+            local margin = math.min(w, h) * 0.02
             local overlap = false
             for _, other in ipairs(self.boosters) do
-                if bx < other.x + other.w + 10 and bx + bw + 10 > other.x and
-                   by < other.y + other.h + 10 and by + bh + 10 > other.y then
+                if bx < other.x + other.w + margin and bx + bw + margin > other.x and
+                   by < other.y + other.h + margin and by + bh + margin > other.y then
                     overlap = true
                     break
                 end
@@ -53,11 +62,14 @@ function M:init(w, h)
                 local dx = math.cos(angle)
                 local dy = math.sin(angle)
                 
+                -- Scale force proportionally
+                local base_force = 600 + math.random() * 600
+                
                 table.insert(self.boosters, {
                     x = bx, y = by,
                     w = bw, h = bh,
                     dir_x = dx, dir_y = dy,
-                    force = math.random(600, 1200)
+                    force = base_force * self.scale
                 })
                 placed = true
             end
@@ -87,6 +99,9 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local line_width = math.max(2, math.floor(4 * self.scale))
+    local arrow_size = math.max(8, math.floor(15 * self.scale))
+    
     for _, b in ipairs(self.boosters) do
         -- Draw zone
         local alpha = 100 + math.sin(self.t * 10) * 50
@@ -110,19 +125,18 @@ function M:draw(ox, oy, w, h)
         local x2 = cx + nx * len
         local y2 = cy + ny * len
         
-        canvas.draw_line(x1, y1, x2, y2, 255, 255, 255, 255, 4)
+        canvas.draw_line(x1, y1, x2, y2, 255, 255, 255, 255, line_width)
         
         -- Draw arrowhead (simple rotation)
         -- Tangent direction (-ny, nx)
-        local arrow_size = 15
         local t1x = x2 - nx * arrow_size + ny * arrow_size * 0.5
         local t1y = y2 - ny * arrow_size - nx * arrow_size * 0.5
         
         local t2x = x2 - nx * arrow_size - ny * arrow_size * 0.5
         local t2y = y2 - ny * arrow_size + nx * arrow_size * 0.5
         
-        canvas.draw_line(x2, y2, t1x, t1y, 255, 255, 255, 255, 4)
-        canvas.draw_line(x2, y2, t2x, t2y, 255, 255, 255, 255, 4)
+        canvas.draw_line(x2, y2, t1x, t1y, 255, 255, 255, 255, line_width)
+        canvas.draw_line(x2, y2, t2x, t2y, 255, 255, 255, 255, line_width)
     end
 end
 

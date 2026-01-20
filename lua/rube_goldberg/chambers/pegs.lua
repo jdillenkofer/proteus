@@ -1,5 +1,5 @@
 -- Chamber 2: Pegs (Plinko style)
--- Grid of pegs for balls to bounce through
+-- Grid of pegs for balls to bounce through (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         pegs = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -18,7 +19,13 @@ function M:init(w, h)
     self.h = h
     self.t = 0
     
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
     self.pegs = {}
+    
+    -- Proportional peg radius (about 2.5% of smaller dimension)
+    local peg_radius = math.min(w, h) * 0.025
     
     -- Randomized peg placement
     local num_pegs = math.random(15, 25)
@@ -27,13 +34,13 @@ function M:init(w, h)
     while #self.pegs < num_pegs and attempts < 1000 do
         attempts = attempts + 1
         
-        local r = 12
-        local margin = 40
-        local x = math.random(margin, w - margin)
-        local y = math.random(math.floor(h * 0.15), math.floor(h * 0.85))
+        -- Proportional margins
+        local margin = math.min(w, h) * 0.08
+        local x = margin + math.random() * (w - 2 * margin)
+        local y = h * 0.15 + math.random() * (h * 0.7)
         
         -- Overlap check: dist must be > peg_diam + ball_diam + margin
-        local min_sep = r * 2 + 22 -- 46
+        local min_sep = peg_radius * 2 + peg_radius * 2 -- Enough space for peg + ball
         local overlap = false
         for _, p in ipairs(self.pegs) do
             local dist = math.sqrt((x - p.x)^2 + (y - p.y)^2)
@@ -44,7 +51,7 @@ function M:init(w, h)
         end
         
         if not overlap then
-             table.insert(self.pegs, { x = x, y = y, radius = r })
+             table.insert(self.pegs, { x = x, y = y, radius = peg_radius })
         end
     end
 end
@@ -88,6 +95,8 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local stroke_width = math.max(1, math.floor(2 * self.scale))
+    
     -- Draw pegs with pulsing glow
     for i, peg in ipairs(self.pegs) do
         local pulse = math.sin(self.t * 3 + i * 0.5) * 0.2 + 0.8
@@ -96,7 +105,7 @@ function M:draw(ox, oy, w, h)
         local b = math.floor(140 * pulse)
         
         canvas.fill_circle(ox + peg.x, oy + peg.y, peg.radius, r, g, b, 255)
-        canvas.stroke_circle(ox + peg.x, oy + peg.y, peg.radius, r + 40, g + 30, b + 30, 200, 2)
+        canvas.stroke_circle(ox + peg.x, oy + peg.y, peg.radius, r + 40, g + 30, b + 30, 200, stroke_width)
     end
 end
 
