@@ -1,0 +1,20 @@
+THIRD-PARTY NOTICES
+
+This project incorporates components from the projects listed below. The original
+copyright notices and the licenses under which we received such components are set
+forth below. We reserve all rights not expressly granted herein, whether by
+implication, estoppel, or otherwise.
+
+{{#each licenses}}
+================================================================================
+{{name}}
+================================================================================
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+License Text:
+{{text}}
+
+{{/each}}

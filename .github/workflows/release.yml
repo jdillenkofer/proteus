@@ -64,17 +64,59 @@ jobs:
     - name: Build
       run: cargo build --release
 
-    - name: Rename Binary
+    - name: Install cargo-about
       shell: bash
       run: |
-        cp target/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
+        cargo install cargo-about
 
-    - name: Upload Release Asset
+    - name: Generate Third-Party Licenses
+      shell: bash
+      run: |
+        # Generate licenses for Rust dependencies
+        cargo about generate -c about.toml about.hbs > THIRD-PARTY-NOTICES.txt
+        
+        # Append MediaPipe Model License
+        echo "" >> THIRD-PARTY-NOTICES.txt
+        echo "================================================================================" >> THIRD-PARTY-NOTICES.txt
+        echo "MediaPipe Selfie Segmentation Model" >> THIRD-PARTY-NOTICES.txt
+        echo "================================================================================" >> THIRD-PARTY-NOTICES.txt
+        echo "" >> THIRD-PARTY-NOTICES.txt
+        curl -L "https://raw.githubusercontent.com/google-ai-edge/mediapipe/master/LICENSE" >> THIRD-PARTY-NOTICES.txt
+        echo "" >> THIRD-PARTY-NOTICES.txt
+        echo "Model: mediapipe_selfie_segmentation_landscape" >> THIRD-PARTY-NOTICES.txt
+        echo "Source: https://huggingface.co/onnx-community/mediapipe_selfie_segmentation_landscape" >> THIRD-PARTY-NOTICES.txt
+
+    - name: Create Release Archive
+      shell: bash
+      run: |
+        # Create release directory
+        mkdir -p release-package
+        
+        # Copy binary
+        cp target/release/${{ matrix.artifact_name }} release-package/
+        
+        # Copy shaders and lua folders
+        cp -r shaders release-package/
+        cp -r lua release-package/
+        
+        # Copy license file
+        cp THIRD-PARTY-NOTICES.txt release-package/
+        
+        # Create zip archive
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          powershell Compress-Archive -Path release-package\* -DestinationPath ${{ matrix.asset_name }}.zip
+        else
+          cd release-package
+          zip -r ../${{ matrix.asset_name }}.zip *
+          cd ..
+        fi
+
+    - name: Upload Release Asset (Zip)
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ./${{ matrix.asset_name }}
-        asset_name: ${{ matrix.asset_name }}
-        asset_content_type: application/octet-stream
+        asset_path: ./${{ matrix.asset_name }}.zip
+        asset_name: ${{ matrix.asset_name }}.zip
+        asset_content_type: application/zip

@@ -1,7 +1,8 @@
 [package]
 name = "proteus"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
+license = "MIT"
 description = "Cross-platform shader webcam transformer"
 
 [features]
