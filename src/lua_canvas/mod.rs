@@ -1,18 +1,20 @@
 //! Lua-based canvas for dynamic texture generation.
 //!
-//! Uses mlua for Lua scripting and tiny-skia for 2D CPU rendering.
+//! Uses mlua for Lua scripting and wgpu for GPU-based 2D rendering.
 //! The Lua script defines init, update, and draw methods which are called
 //! each frame to generate RGBA pixel data.
+
+mod gpu_canvas;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use anyhow::{anyhow, Result};
 use fontdb::{Database, ID};
+use gpu_canvas::GpuCanvas;
 use mlua::{Function, Lua, Table};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
-use tiny_skia::{Color, Mask, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use tracing::{debug, error, info, warn};
 
 /// A Lua-driven canvas that renders to an RGBA buffer each frame.
@@ -20,16 +22,104 @@ pub struct LuaCanvas {
     path: PathBuf,
     pub width: u32,
     pub height: u32,
-    pixmap: Arc<Mutex<Pixmap>>,
-    clip_mask: Arc<Mutex<Option<Mask>>>,
-    font_db: Arc<FontDatabase>,
+    gpu_canvas: Arc<Mutex<GpuCanvas>>,
     lua: Lua,
     instance: Option<mlua::RegistryKey>,
     last_time: f32,
     initialized: bool,
+    view_dirty: bool,
+    // API state for the high-performance batcher
+    api_state: Arc<Mutex<GpuCanvasBatcherState>>,
     // File watching
     _watcher: Option<RecommendedWatcher>,
     reload_rx: Option<Receiver<std::result::Result<Event, notify::Error>>>,
+}
+
+/// Cached glyph entry in the atlas
+struct GlyphCacheEntry {
+    atlas_x: u32,
+    atlas_y: u32,
+    width: u32,
+    height: u32,
+    advance: f32,
+    offset_x: f32,
+    offset_y: f32,
+}
+
+/// Simple row-based atlas allocator
+struct AtlasAllocator {
+    current_x: u32,
+    current_y: u32,
+    row_height: u32,
+    atlas_size: u32,
+}
+
+impl AtlasAllocator {
+    fn new(atlas_size: u32) -> Self {
+        Self {
+            current_x: 0,
+            current_y: 0,
+            row_height: 0,
+            atlas_size,
+        }
+    }
+
+    fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 {
+            return Some((0, 0));
+        }
+        
+        // Check if we need to start a new row
+        if self.current_x + width > self.atlas_size {
+            self.current_x = 0;
+            self.current_y += self.row_height + 1; // +1 for padding
+            self.row_height = 0;
+        }
+        
+        // Check if we've run out of space
+        if self.current_y + height > self.atlas_size {
+            return None; // Atlas full
+        }
+        
+        let x = self.current_x;
+        let y = self.current_y;
+        
+        self.current_x += width + 1; // +1 for padding
+        self.row_height = self.row_height.max(height);
+        
+        Some((x, y))
+    }
+
+    fn reset(&mut self) {
+        self.current_x = 0;
+        self.current_y = 0;
+        self.row_height = 0;
+    }
+}
+
+/// Shared state for the Lua API batcher
+struct GpuCanvasBatcherState {
+    width: u32,
+    height: u32,
+    commands: Vec<gpu_canvas::DrawCommand>,
+    clip_active: bool,
+    // Dependencies for immediate or complex draws
+    gpu_canvas: Arc<Mutex<GpuCanvas>>,
+    font_db: Arc<FontDatabase>,
+    image_cache: Arc<Mutex<std::collections::HashMap<String, Arc<ImageData>>>>,
+    // Glyph caching: key is (font_id, glyph_id, size_in_tenths)
+    glyph_cache: std::collections::HashMap<(ID, u16, u32), GlyphCacheEntry>,
+    atlas_allocator: AtlasAllocator,
+}
+
+/// Wrapper for Lua to call canvas methods efficiently
+
+
+
+struct ImageData {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
 }
 
 /// Thread-safe font database with cached font data.
@@ -117,13 +207,21 @@ pub struct LuaFrame {
 
 impl LuaCanvas {
     /// Create a new LuaCanvas from a Lua script path.
-    pub fn new(path: impl AsRef<Path>, width: u32, height: u32) -> Result<Self> {
+    pub fn new(
+        path: impl AsRef<Path>,
+        width: u32,
+        height: u32,
+        device_queue: Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)>,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         info!("Creating LuaCanvas from {:?} ({}x{})", path, width, height);
 
-        let pixmap = Pixmap::new(width, height)
-            .ok_or_else(|| anyhow!("Failed to create pixmap {}x{}", width, height))?;
-        let pixmap = Arc::new(Mutex::new(pixmap));
+        let gpu_canvas = if let Some((device, queue)) = device_queue {
+            GpuCanvas::with_device_queue(device, queue, width, height)
+        } else {
+            GpuCanvas::new(width, height)
+        };
+        let gpu_canvas = Arc::new(Mutex::new(gpu_canvas));
 
         // Initialize font database with system fonts
         let font_db = Arc::new(FontDatabase::new());
@@ -150,17 +248,29 @@ impl LuaCanvas {
             }
         };
         
+        let image_cache = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
         let mut canvas = Self {
             path,
             width,
             height,
-            pixmap,
-            clip_mask: Arc::new(Mutex::new(None)),
-            font_db,
+            gpu_canvas: gpu_canvas.clone(),
             lua,
             instance: None,
             last_time: 0.0,
             initialized: false,
+            view_dirty: true,
+            api_state: Arc::new(Mutex::new(GpuCanvasBatcherState {
+                width,
+                height,
+                commands: Vec::with_capacity(1024),
+                clip_active: false,
+                gpu_canvas,
+                font_db,
+                image_cache,
+                glyph_cache: std::collections::HashMap::new(),
+                atlas_allocator: AtlasAllocator::new(2048),
+            })),
             _watcher: watcher,
             reload_rx,
         };
@@ -226,19 +336,27 @@ impl LuaCanvas {
 
     /// Register the canvas drawing API in Lua globals.
     fn register_canvas_api(&mut self) -> Result<()> {
-        let pixmap = self.pixmap.clone();
-        let width = self.width;
-        let height = self.height;
+        let state = self.api_state.clone();
+        let lua = &self.lua;
+        let canvas_table = lua.create_table()?;
 
-        let canvas_table = self.lua.create_table()?;
+
 
         // canvas.clear(r, g, b, a)
         {
-            let pixmap = pixmap.clone();
-            let clear_fn = self.lua.create_function(move |_, (r, g, b, a): (u8, u8, u8, u8)| {
-                let color = Color::from_rgba8(r, g, b, a);
-                if let Ok(mut pm) = pixmap.lock() {
-                    pm.fill(color);
+            let state = state.clone();
+            let clear_fn = lua.create_function(move |_, (r, g, b, a): (u8, u8, u8, u8)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                s.commands.clear();
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::PopClip,
+                    uniforms: [0.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: false,
+                });
+                s.clip_active = false;
+                if let Ok(mut canvas) = s.gpu_canvas.lock() {
+                    canvas.clear(r, g, b, a);
                 }
                 Ok(())
             })?;
@@ -247,20 +365,16 @@ impl LuaCanvas {
 
         // canvas.fill_rect(x, y, w, h, r, g, b, a)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let fill_rect_fn = self.lua.create_function(move |_, (x, y, w, h, r, g, b, a): (f32, f32, f32, f32, u8, u8, u8, u8)| {
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, a);
-                paint.anti_alias = true;
-
-                if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
-                    if let Ok(mut pm) = pixmap.lock() {
-                        let mask = clip_mask.lock().ok();
-                        let mask_ref = mask.as_ref().and_then(|m| m.as_ref());
-                        pm.fill_rect(rect, &paint, Transform::identity(), mask_ref);
-                    }
-                }
+            let state = state.clone();
+            let fill_rect_fn = lua.create_function(move |_, (x, y, wr, hr, r, g, b, a): (f32, f32, f32, f32, u8, u8, u8, u8)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::FillRect,
+                    uniforms: [x, y, wr, hr, r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
                 Ok(())
             })?;
             canvas_table.set("fill_rect", fill_rect_fn)?;
@@ -268,49 +382,54 @@ impl LuaCanvas {
 
         // canvas.fill_circle(cx, cy, radius, r, g, b, a)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let fill_circle_fn = self.lua.create_function(move |_, (cx, cy, radius, r, g, b, a): (f32, f32, f32, u8, u8, u8, u8)| {
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, a);
-                paint.anti_alias = true;
-
-                let mut pb = PathBuilder::new();
-                pb.push_circle(cx, cy, radius);
-                if let Some(path) = pb.finish() {
-                    if let Ok(mut pm) = pixmap.lock() {
-                        let mask = clip_mask.lock().ok();
-                        let mask_ref = mask.as_ref().and_then(|m| m.as_ref());
-                        pm.fill_path(&path, &paint, tiny_skia::FillRule::Winding, Transform::identity(), mask_ref);
-                    }
-                }
+            let state = state.clone();
+            let fill_circle_fn = lua.create_function(move |_, (cx, cy, rad, r, g, b, a): (f32, f32, f32, u8, u8, u8, u8)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::FillCircle,
+                    uniforms: [cx, cy, rad, 0.0, r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
                 Ok(())
             })?;
             canvas_table.set("fill_circle", fill_circle_fn)?;
         }
 
-        // canvas.stroke_rect(x, y, w, h, r, g, b, a, stroke_width)
+        // ... repeat for others as needed ...
+        // For brevity, I'll only add the ones used in rube_goldberg for now and then add the rest.
+        // Actually, I'll add all of them to be safe.
+
+        // canvas.stroke_rect(x, y, w, h, r, g, b, a, stroke)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let stroke_rect_fn = self.lua.create_function(move |_, (x, y, w, h, r, g, b, a, stroke_width): (f32, f32, f32, f32, u8, u8, u8, u8, f32)| {
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, a);
-                paint.anti_alias = true;
-
-                let stroke = Stroke { width: stroke_width, ..Default::default() };
-
-                let mut pb = PathBuilder::new();
-                if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
-                    pb.push_rect(rect);
-                }
-                if let Some(path) = pb.finish() {
-                    if let Ok(mut pm) = pixmap.lock() {
-                        let mask = clip_mask.lock().ok();
-                        let mask_ref = mask.as_ref().and_then(|m| m.as_ref());
-                        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), mask_ref);
-                    }
-                }
+            let state = state.clone();
+            let stroke_rect_fn = lua.create_function(move |_, (x, y, wr, hr, r, g, b, a, sw): (f32, f32, f32, f32, u8, u8, u8, u8, f32)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0];
+                let extra = [0.0, w, h, 0.0];
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::FillRect,
+                    uniforms: [x, y, wr, sw, color[0], color[1], color[2], color[3], extra[0], extra[1], extra[2], extra[3], 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::FillRect,
+                    uniforms: [x, y + hr - sw, wr, sw, color[0], color[1], color[2], color[3], extra[0], extra[1], extra[2], extra[3], 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::FillRect,
+                    uniforms: [x, y, sw, hr, color[0], color[1], color[2], color[3], extra[0], extra[1], extra[2], extra[3], 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::FillRect,
+                    uniforms: [x + wr - sw, y, sw, hr, color[0], color[1], color[2], color[3], extra[0], extra[1], extra[2], extra[3], 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
                 Ok(())
             })?;
             canvas_table.set("stroke_rect", stroke_rect_fn)?;
@@ -318,177 +437,149 @@ impl LuaCanvas {
 
         // canvas.stroke_circle(cx, cy, radius, r, g, b, a, stroke_width)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let stroke_circle_fn = self.lua.create_function(move |_, (cx, cy, radius, r, g, b, a, stroke_width): (f32, f32, f32, u8, u8, u8, u8, f32)| {
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, a);
-                paint.anti_alias = true;
-
-                let stroke = Stroke { width: stroke_width, ..Default::default() };
-
-                let mut pb = PathBuilder::new();
-                pb.push_circle(cx, cy, radius);
-                if let Some(path) = pb.finish() {
-                    if let Ok(mut pm) = pixmap.lock() {
-                        let mask = clip_mask.lock().ok();
-                        let mask_ref = mask.as_ref().and_then(|m| m.as_ref());
-                        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), mask_ref);
-                    }
-                }
+            let state = state.clone();
+            let stroke_circle_fn = lua.create_function(move |_, (cx, cy, rad, r, g, b, a, sw): (f32, f32, f32, u8, u8, u8, u8, f32)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::StrokeCircle,
+                    uniforms: [cx, cy, rad, 0.0, r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0, sw, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
                 Ok(())
             })?;
             canvas_table.set("stroke_circle", stroke_circle_fn)?;
         }
 
-        // canvas.draw_line(x1, y1, x2, y2, r, g, b, a, stroke_width)
+        // canvas.push_clip(x, y, w, h)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let draw_line_fn = self.lua.create_function(move |_, (x1, y1, x2, y2, r, g, b, a, stroke_width): (f32, f32, f32, f32, u8, u8, u8, u8, f32)| {
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, a);
-                paint.anti_alias = true;
-
-                let stroke = Stroke { width: stroke_width, ..Default::default() };
-
-                let mut pb = PathBuilder::new();
-                pb.move_to(x1, y1);
-                pb.line_to(x2, y2);
-                if let Some(path) = pb.finish() {
-                    if let Ok(mut pm) = pixmap.lock() {
-                        let mask = clip_mask.lock().ok();
-                        let mask_ref = mask.as_ref().and_then(|m| m.as_ref());
-                        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), mask_ref);
-                    }
-                }
-                Ok(())
-            })?;
-            canvas_table.set("draw_line", draw_line_fn)?;
-        }
-
-        // canvas.push_clip(x, y, w, h) - Set a clipping rectangle
-        {
-            let clip_mask = self.clip_mask.clone();
-            let cw = width;
-            let ch = height;
-            let push_clip_fn = self.lua.create_function(move |_, (x, y, w, h): (f32, f32, f32, f32)| {
-                if let Ok(mut mask) = clip_mask.lock() {
-                    if let Some(mut new_mask) = Mask::new(cw, ch) {
-                        let mut pb = PathBuilder::new();
-                        if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
-                            pb.push_rect(rect);
-                        }
-                        if let Some(path) = pb.finish() {
-                            new_mask.fill_path(&path, tiny_skia::FillRule::Winding, true, Transform::identity());
-                        }
-                        *mask = Some(new_mask);
-                    }
-                }
+            let state = state.clone();
+            let push_clip_fn = lua.create_function(move |_, (x, y, wr, hr): (f32, f32, f32, f32)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::PushClip,
+                    uniforms: [x, y, wr, hr, 1.0, 1.0, 1.0, 1.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
+                s.clip_active = true;
                 Ok(())
             })?;
             canvas_table.set("push_clip", push_clip_fn)?;
         }
 
-        // canvas.pop_clip() - Clear clipping rectangle
+        // canvas.pop_clip()
         {
-            let clip_mask = self.clip_mask.clone();
-            let pop_clip_fn = self.lua.create_function(move |_, ()| {
-                if let Ok(mut mask) = clip_mask.lock() {
-                    *mask = None;
-                }
+            let state = state.clone();
+            let pop_clip_fn = lua.create_function(move |_, (): ()| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::PopClip,
+                    uniforms: [0.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
+                s.clip_active = false;
                 Ok(())
             })?;
             canvas_table.set("pop_clip", pop_clip_fn)?;
         }
 
-        // canvas.draw_text(x, y, text, size, r, g, b, a) - Draw text with default font
+        // canvas.draw_text(x, y, text, size, r, g, b, a)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let font_db = self.font_db.clone();
-            let draw_text_fn = self.lua.create_function(
-                move |_, (x, y, text, size, r, g, b, a): (f32, f32, String, f32, u8, u8, u8, u8)| {
-                    draw_text_impl(&pixmap, &clip_mask, &font_db, None, x, y, &text, size, r, g, b, a);
-                    Ok(())
-                },
-            )?;
+            let state = state.clone();
+            let draw_text_fn = lua.create_function(move |_, (x, y, text, size, r, g, b, a): (f32, f32, String, f32, u8, u8, u8, u8)| {
+                let mut s = state.lock().unwrap();
+                draw_text_impl(&mut s, None, x, y, &text, size, r, g, b, a);
+                Ok(())
+            })?;
             canvas_table.set("draw_text", draw_text_fn)?;
         }
-
-        // canvas.draw_text_font(x, y, text, font_family, size, r, g, b, a) - Draw text with specific font
+        
+        // canvas.draw_line(x1, y1, x2, y2, r, g, b, a, sw)
         {
-            let pixmap = pixmap.clone();
-            let clip_mask = self.clip_mask.clone();
-            let font_db = self.font_db.clone();
-            let draw_text_font_fn = self.lua.create_function(
-                move |_,
-                      (x, y, text, font_family, size, r, g, b, a): (
-                    f32,
-                    f32,
-                    String,
-                    String,
-                    f32,
-                    u8,
-                    u8,
-                    u8,
-                    u8,
-                )| {
-                    draw_text_impl(
-                        &pixmap,
-                        &clip_mask,
-                        &font_db,
-                        Some(&font_family),
-                        x,
-                        y,
-                        &text,
-                        size,
-                        r,
-                        g,
-                        b,
-                        a,
-                    );
-                    Ok(())
-                },
-            )?;
+            let state = state.clone();
+            let draw_line_fn = lua.create_function(move |_, (x1, y1, x2, y2, r, g, b, a, sw): (f32, f32, f32, f32, u8, u8, u8, u8, f32)| {
+                let mut s = state.lock().unwrap();
+                let (w, h) = (s.width as f32, s.height as f32);
+                let clip = s.clip_active;
+                s.commands.push(gpu_canvas::DrawCommand {
+                    cmd_type: gpu_canvas::DrawCommandType::Line,
+                    uniforms: [x1, y1, x2, y2, r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0, sw, w, h, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    clip_active: clip,
+                });
+                Ok(())
+            })?;
+            canvas_table.set("draw_line", draw_line_fn)?;
+        }
+
+        // canvas.draw_image(path, x, y, [w, h])
+        {
+            let state = state.clone();
+            let draw_image_fn = lua.create_function(move |_, (path, x, y, img_w, img_h): (String, f32, f32, Option<f32>, Option<f32>)| {
+                let mut s = state.lock().unwrap();
+                // Ensure all batched commands are pushed to GPU before immediate draw
+                if !s.commands.is_empty() {
+                    let commands = std::mem::take(&mut s.commands);
+                    if let Ok(mut canvas) = s.gpu_canvas.lock() {
+                        canvas.add_commands(commands);
+                    }
+                }
+                draw_image_impl(&s.gpu_canvas, &s.image_cache, &path, x, y, img_w, img_h);
+                Ok(())
+            })?;
+            canvas_table.set("draw_image", draw_image_fn)?;
+        }
+
+        // canvas.draw_text_font(x, y, text, font, size, r, g, b, a)
+        {
+            let state = state.clone();
+            let draw_text_font_fn = lua.create_function(move |_, (x, y, text, font, size, r, g, b, a): (f32, f32, String, String, f32, u8, u8, u8, u8)| {
+                let mut s = state.lock().unwrap();
+                draw_text_impl(&mut s, Some(&font), x, y, &text, size, r, g, b, a);
+                Ok(())
+            })?;
             canvas_table.set("draw_text_font", draw_text_font_fn)?;
         }
 
-        // canvas.measure_text(text, size) - Returns width, height of text with default font
+        // canvas.measure_text(text, size)
         {
-            let font_db = self.font_db.clone();
-            let measure_text_fn = self.lua.create_function(move |_, (text, size): (String, f32)| {
-                let (w, h) = measure_text_impl(&font_db, None, &text, size);
+            let state = state.clone();
+            let measure_text_fn = lua.create_function(move |_, (text, size): (String, f32)| {
+                let s = state.lock().unwrap();
+                let (w, h) = measure_text_impl(&s.font_db, None, &text, size);
                 Ok((w, h))
             })?;
             canvas_table.set("measure_text", measure_text_fn)?;
         }
 
-        // canvas.measure_text_font(text, font_family, size) - Returns width, height with specific font
+        // canvas.measure_text_font(text, font, size)
         {
-            let font_db = self.font_db.clone();
-            let measure_text_font_fn =
-                self.lua
-                    .create_function(move |_, (text, font_family, size): (String, String, f32)| {
-                        let (w, h) = measure_text_impl(&font_db, Some(&font_family), &text, size);
-                        Ok((w, h))
-                    })?;
+            let state = state.clone();
+            let measure_text_font_fn = lua.create_function(move |_, (text, font, size): (String, String, f32)| {
+                let s = state.lock().unwrap();
+                let (w, h) = measure_text_impl(&s.font_db, Some(&font), &text, size);
+                Ok((w, h))
+            })?;
             canvas_table.set("measure_text_font", measure_text_font_fn)?;
         }
 
-        // canvas.list_fonts() - Returns array of available font family names
+        // canvas.list_fonts()
         {
-            let font_db = self.font_db.clone();
-            let list_fonts_fn = self.lua.create_function(move |_, ()| {
-                let families = font_db.list_families();
-                Ok(families)
+            let state = state.clone();
+            let list_fonts_fn = lua.create_function(move |_, (): ()| {
+                let s = state.lock().unwrap();
+                Ok(s.font_db.list_families())
             })?;
             canvas_table.set("list_fonts", list_fonts_fn)?;
         }
 
-        // canvas.width, canvas.height
-        canvas_table.set("width", width)?;
-        canvas_table.set("height", height)?;
+        // width, height
+        canvas_table.set("width", self.width)?;
+        canvas_table.set("height", self.height)?;
 
         self.lua.globals().set("canvas", canvas_table)?;
         Ok(())
@@ -627,10 +718,12 @@ impl LuaCanvas {
         }
         let draw_time = draw_start.elapsed();
 
-        // Return the pixel data
+        // Read pixels from GPU
         let copy_start = Instant::now();
-        let pm = self.pixmap.lock().ok()?;
-        let data = pm.data().to_vec();
+        let data = {
+            let mut canvas = self.gpu_canvas.lock().ok()?;
+            canvas.read_pixels()
+        };
         let copy_time = copy_start.elapsed();
         
         let total_time = frame_start.elapsed();
@@ -649,13 +742,93 @@ impl LuaCanvas {
             height: self.height,
         })
     }
+
+    /// Prepare the canvas texture for direct GPU access (no CPU readback).
+    /// Runs update/draw Lua methods and returns a texture view.
+    pub fn prepare_texture(&mut self, time: f32) -> Option<wgpu::TextureView> {
+        use std::time::Instant;
+        
+        let frame_start = Instant::now();
+        
+        // Check for hot reload
+        self.check_reload();
+
+        let instance_key = self.instance.as_ref()?;
+        let instance: Table = self.lua.registry_value(instance_key).ok()?;
+
+        // Call init once
+        if !self.initialized {
+            if let Ok(init_fn) = instance.get::<Function>("init") {
+                if let Err(e) = init_fn.call::<()>((&instance, self.width, self.height)) {
+                    warn!("Lua init() error: {}", e);
+                }
+            }
+            self.initialized = true;
+            self.last_time = time;
+        }
+
+        // Calculate delta time
+        let dt = time - self.last_time;
+        self.last_time = time;
+
+        // Call update(dt)
+        let update_start = Instant::now();
+        if let Ok(update_fn) = instance.get::<Function>("update") {
+            if let Err(e) = update_fn.call::<()>((&instance, dt)) {
+                warn!("Lua update() error: {}", e);
+            }
+        }
+        let update_time = update_start.elapsed();
+
+        // Call draw()
+        let draw_start = Instant::now();
+        if let Ok(draw_fn) = instance.get::<Function>("draw") {
+            if let Err(e) = draw_fn.call::<()>(&instance) {
+                warn!("Lua draw() error: {}", e);
+            }
+        }
+        let draw_time = draw_start.elapsed();
+
+        // Flush draws and get texture view (no CPU readback!)
+        let flush_start = Instant::now();
+        let (texture_view, is_dirty) = {
+            let mut canvas = self.gpu_canvas.lock().ok()?;
+            // Sync commands from our local batcher
+            {
+                let mut state = self.api_state.lock().unwrap();
+                if !state.commands.is_empty() {
+                    canvas.add_commands(std::mem::take(&mut state.commands));
+                }
+            }
+            canvas.prepare_texture();
+            let view = canvas.texture_view().clone();
+            let dirty = self.view_dirty;
+            self.view_dirty = false;
+            (view, dirty)
+        };
+        let flush_time = flush_start.elapsed();
+        
+        let total_time = frame_start.elapsed();
+        
+        debug!(
+            "[Perf] LuaCanvas (GPU) - update: {:?}, draw: {:?}, flush: {:?}, total: {:?}",
+            update_time,
+            draw_time,
+            flush_time,
+            total_time,
+        );
+        
+        if is_dirty {
+            Some(texture_view)
+        } else {
+            None
+        }
+    }
 }
 
-/// Helper function to render text onto a pixmap.
+/// Helper function to render text onto the GPU canvas with glyph caching.
 fn draw_text_impl(
-    pixmap: &Arc<Mutex<Pixmap>>,
-    clip_mask: &Arc<Mutex<Option<Mask>>>,
-    font_db: &Arc<FontDatabase>,
+    state: &mut GpuCanvasBatcherState,
     font_family: Option<&str>,
     x: f32,
     y: f32,
@@ -668,15 +841,15 @@ fn draw_text_impl(
 ) {
     // Find font
     let font_id = font_family
-        .and_then(|family| font_db.find_font(family))
-        .or_else(|| font_db.default_font());
+        .and_then(|family| state.font_db.find_font(family))
+        .or_else(|| state.font_db.default_font());
 
     let Some(font_id) = font_id else {
         warn!("No fonts available for text rendering");
         return;
     };
 
-    let Some(font_data) = font_db.get_font_data(font_id) else {
+    let Some(font_data) = state.font_db.get_font_data(font_id) else {
         warn!("Failed to load font data");
         return;
     };
@@ -688,89 +861,110 @@ fn draw_text_impl(
 
     let scale = PxScale::from(size);
     let scaled_font = font.as_scaled(scale);
+    let size_key = (size * 10.0) as u32; // Tenths of a pixel for stable caching
 
-    let mut pm = match pixmap.lock() {
-        Ok(pm) => pm,
-        Err(_) => return,
-    };
-
-    let mask_guard = clip_mask.lock().ok();
-
-    // Calculate baseline position (y is the top of the text, add ascent to get baseline)
+    // Calculate baseline position
     let ascent = scaled_font.ascent();
     let baseline_y = y + ascent;
-
     let mut cursor_x = x;
+
+    // We need to keep the canvas lock during the entire loop to batch commands correctly
+    let Ok(mut canvas) = state.gpu_canvas.lock() else {
+        return;
+    };
+
+    // If we have existing non-glyph commands, flush them first to maintain order
+    // (though usually text is drawn on top or separately)
+    if !state.commands.is_empty() {
+        let commands = std::mem::take(&mut state.commands);
+        canvas.add_commands(commands);
+    }
 
     for c in text.chars() {
         let glyph_id = scaled_font.glyph_id(c);
-        let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(cursor_x, baseline_y));
+        let key = (font_id, glyph_id.0, size_key);
 
-        // Advance cursor
-        cursor_x += scaled_font.h_advance(glyph_id);
+        let entry = if let Some(entry) = state.glyph_cache.get(&key) {
+            entry
+        } else {
+            // Not in cache, rasterize and upload
+            let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(0.0, 0.0));
+            if let Some(outlined) = scaled_font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                let width = bounds.width() as u32;
+                let height = bounds.height() as u32;
 
-        // Get outlined glyph for rendering
-        if let Some(outlined) = scaled_font.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            let pm_width = pm.width() as i32;
-            let pm_height = pm.height() as i32;
+                if width > 0 && height > 0 {
+                    let mut pixels = vec![0u8; (width * height) as usize];
+                    outlined.draw(|gx, gy, coverage| {
+                        if gx < width && gy < height {
+                            pixels[(gy * width + gx) as usize] = (coverage * 255.0) as u8;
+                        }
+                    });
 
-            // Render glyph to pixmap
-            outlined.draw(|gx, gy, coverage| {
-                let px = bounds.min.x as i32 + gx as i32;
-                let py = bounds.min.y as i32 + gy as i32;
-
-                if px < 0 || py < 0 || px >= pm_width || py >= pm_height {
-                    return;
-                }
-
-                // Check clip mask
-                if let Some(ref guard) = mask_guard {
-                    if let Some(ref mask) = **guard {
-                        let mask_idx = (py as usize) * (pm_width as usize) + (px as usize);
-                        if mask.data()[mask_idx] == 0 {
-                            return;
+                    // Allocate atlas space
+                    if let Some((ax, ay)) = state.atlas_allocator.allocate(width, height) {
+                        // Upload to GPU atlas
+                        canvas.upload_glyph_to_atlas(ax, ay, width, height, &pixels);
+                        
+                        let new_entry = GlyphCacheEntry {
+                            atlas_x: ax,
+                            atlas_y: ay,
+                            width,
+                            height,
+                            advance: scaled_font.h_advance(glyph_id),
+                            offset_x: bounds.min.x,
+                            offset_y: bounds.min.y,
+                        };
+                        state.glyph_cache.insert(key, new_entry);
+                        state.glyph_cache.get(&key).unwrap()
+                    } else {
+                        // Atlas full - reset and try again (simple strategy)
+                        state.atlas_allocator.reset();
+                        state.glyph_cache.clear();
+                        // Recursive retry once
+                        if let Some((ax, ay)) = state.atlas_allocator.allocate(width, height) {
+                            canvas.upload_glyph_to_atlas(ax, ay, width, height, &pixels);
+                            let new_entry = GlyphCacheEntry {
+                                atlas_x: ax,
+                                atlas_y: ay,
+                                width,
+                                height,
+                                advance: scaled_font.h_advance(glyph_id),
+                                offset_x: bounds.min.x,
+                                offset_y: bounds.min.y,
+                            };
+                            state.glyph_cache.insert(key, new_entry);
+                            state.glyph_cache.get(&key).unwrap()
+                        } else {
+                            continue; // Still fails? Skip.
                         }
                     }
+                } else {
+                    // Empty glyph (like space), just advance
+                    cursor_x += scaled_font.h_advance(glyph_id);
+                    continue;
                 }
+            } else {
+                cursor_x += scaled_font.h_advance(glyph_id);
+                continue;
+            }
+        };
 
-                // Alpha blend the glyph onto the pixmap
-                let alpha = (coverage * a as f32) as u8;
-                if alpha == 0 {
-                    return;
-                }
+        // Add draw command to canvas (batched)
+        canvas.queue_glyph(
+            cursor_x + entry.offset_x,
+            baseline_y + entry.offset_y,
+            entry.width as f32,
+            entry.height as f32,
+            entry.atlas_x as f32,
+            entry.atlas_y as f32,
+            entry.width as f32,
+            entry.height as f32,
+            r, g, b, a
+        );
 
-                // Calculate pixel index
-                let idx = (py as usize) * (pm_width as usize) + (px as usize);
-                let pixels = pm.pixels_mut();
-                let pixel = &mut pixels[idx];
-
-                // Premultiplied alpha blending
-                let src_a = alpha as f32 / 255.0;
-                let dst_a = pixel.alpha() as f32 / 255.0;
-                let out_a = src_a + dst_a * (1.0 - src_a);
-
-                let blend = |src: u8, dst: u8| -> u8 {
-                    if out_a == 0.0 {
-                        0
-                    } else {
-                        let src_f = src as f32 / 255.0;
-                        let dst_f = dst as f32 / 255.0;
-                        let out = (src_f * src_a + dst_f * dst_a * (1.0 - src_a)) / out_a;
-                        (out * 255.0).clamp(0.0, 255.0) as u8
-                    }
-                };
-
-                if let Some(new_pixel) = tiny_skia::PremultipliedColorU8::from_rgba(
-                    blend(r, pixel.red()),
-                    blend(g, pixel.green()),
-                    blend(b, pixel.blue()),
-                    (out_a * 255.0).clamp(0.0, 255.0) as u8,
-                ) {
-                    *pixel = new_pixel;
-                }
-            });
-        }
+        cursor_x += entry.advance;
     }
 }
 
@@ -805,4 +999,50 @@ fn measure_text_impl(font_db: &Arc<FontDatabase>, font_family: Option<&str>, tex
     let height = scaled_font.ascent() - scaled_font.descent();
 
     (width, height)
+}
+
+fn draw_image_impl(
+    gpu_canvas: &Arc<Mutex<GpuCanvas>>,
+    image_cache: &Arc<Mutex<std::collections::HashMap<String, Arc<ImageData>>>>,
+    path: &str,
+    x: f32,
+    y: f32,
+    w: Option<f32>,
+    h: Option<f32>,
+) {
+    let img_data = {
+        let Ok(mut cache) = image_cache.lock() else { return; };
+        if let Some(data) = cache.get(path) {
+            data.clone()
+        } else {
+            // Load image using local path
+            match image::open(path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let data = Arc::new(ImageData {
+                        width: rgba.width(),
+                        height: rgba.height(),
+                        data: rgba.into_raw(),
+                    });
+                    cache.insert(path.to_string(), data.clone());
+                    data
+                }
+                Err(e) => {
+                    warn!("Failed to load image from {}: {}", path, e);
+                    return;
+                }
+            }
+        }
+    };
+
+    if let Ok(mut canvas) = gpu_canvas.lock() {
+        // Important: Flush batch before writing image pixels
+        canvas.flush();
+        
+        let target_w = w.unwrap_or(img_data.width as f32) as u32;
+        let target_h = h.unwrap_or(img_data.height as f32) as u32;
+        
+        // Fast path for 1:1 image writes. Resize is not yet supported in this direct path.
+        canvas.draw_image(x as i32, y as i32, target_w, target_h, &img_data.data);
+    }
 }

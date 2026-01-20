@@ -96,6 +96,8 @@ pub struct WgpuPipeline {
     lua_canvases: Vec<LuaCanvas>,
     /// Which texture slots are Lua canvases (index into lua_canvases)
     lua_slot_map: [Option<usize>; 4],
+    /// Cached texture views for Lua canvases (to avoid expensive copies)
+    lua_canvas_views: [Option<wgpu::TextureView>; 4],
 
     // Performance Cache
     input_texture: Option<wgpu::Texture>,
@@ -541,6 +543,7 @@ impl WgpuPipeline {
             video_slot_map,
             lua_canvases,
             lua_slot_map,
+            lua_canvas_views: [None, None, None, None],
             input_texture: None,
             output_textures: Vec::new(),
             readback_buffer: None,
@@ -806,7 +809,7 @@ impl WgpuPipeline {
         }).collect();
         
         let image_views: [wgpu::TextureView; 4] = std::array::from_fn(|i| {
-            self.image_textures[i].create_view(&wgpu::TextureViewDescriptor::default())
+                self.image_textures[i].create_view(&wgpu::TextureViewDescriptor::default())
         });
         
         // Track which mask to bind. Start with the ML mask.
@@ -819,19 +822,30 @@ impl WgpuPipeline {
                 self.output_textures[i-1].create_view(&wgpu::TextureViewDescriptor::default())
             };
 
+            let mut entries = vec![
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(current_mask_view) },
+            ];
+
+            // Add the 4 texture slots. For each, use either the Lua canvas view or the image view.
+            for j in 0..4 {
+                let view = if let Some(view) = self.lua_canvas_views[j].as_ref() {
+                    view
+                } else {
+                    &image_views[j]
+                };
+                entries.push(wgpu::BindGroupEntry { 
+                    binding: (4 + j) as u32, 
+                    resource: wgpu::BindingResource::TextureView(view) 
+                });
+            }
+
             let bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&format!("Bind Group {}", i)),
                 layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&input_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(current_mask_view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&image_views[0]) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&image_views[1]) },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&image_views[2]) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&image_views[3]) },
-                ],
+                entries: &entries,
             });
             self.bind_groups.push(bind_group);
             
@@ -1068,47 +1082,14 @@ impl WgpuPipeline {
             }
         }
 
-        // 6. Update Lua canvas textures with current frames
+        // 6. Update Lua canvas textures (Direct GPU access, no CPU readback)
         for (slot_index, canvas_index) in self.lua_slot_map.iter().enumerate() {
             if let Some(canvas_idx) = canvas_index {
-                if let Some(frame) = self.lua_canvases[*canvas_idx].get_frame(time) {
-                    let current_texture = &self.image_textures[slot_index];
-                    
-                    // Check if texture needs resizing
-                    if current_texture.width() != frame.width || current_texture.height() != frame.height {
-                        info!("Resizing Lua canvas texture slot {} to {}x{}", slot_index, frame.width, frame.height);
-                        
-                        let new_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some(&format!("Lua Canvas Texture {}", slot_index)),
-                            size: wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            view_formats: &[],
-                        });
-                        
-                        self.image_textures[slot_index] = new_texture;
-                        bind_groups_need_update = true;
-                    }
-
-                    // Upload Lua canvas frame to texture
-                    self.context.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo { 
-                            texture: &self.image_textures[slot_index],  
-                            mip_level: 0, 
-                            origin: wgpu::Origin3d::ZERO, 
-                            aspect: wgpu::TextureAspect::All 
-                        },
-                        &frame.data,
-                        wgpu::TexelCopyBufferLayout { 
-                            offset: 0, 
-                            bytes_per_row: Some(frame.width * 4), 
-                            rows_per_image: Some(frame.height) 
-                        },
-                        wgpu::Extent3d { width: frame.width, height: frame.height, depth_or_array_layers: 1 },
-                    );
+                // prepare_texture runs Lua update/draw and flushes to GPU
+                if let Some(view) = self.lua_canvases[*canvas_idx].prepare_texture(time) {
+                    self.lua_canvas_views[slot_index] = Some(view);
+                    // Since the view identity might change, we must update bind groups
+                    bind_groups_need_update = true;
                 }
             }
         }

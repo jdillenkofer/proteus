@@ -284,10 +284,11 @@ impl ProteusApp {
         // Load shaders if provided
         let shaders = load_shaders(&self.config.shader);
 
-        // Initialize shader pipeline with textures from config
-        let texture_sources = load_textures_with_size(&self.config.textures, self.config.width, self.config.height);
-        
         let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("GPU context not initialized"))?;
+
+        // Initialize shader pipeline with textures from config
+        let texture_sources = load_textures_with_size(&self.config.textures, self.config.width, self.config.height, Some(context.clone()));
+        
         self.pipeline = Some(WgpuPipeline::new(context, self.config.width, self.config.height, shaders, texture_sources)?);
         info!("Shader pipeline initialized");
 
@@ -363,9 +364,9 @@ impl ProteusApp {
 
     fn rebuild_pipeline(&mut self, config: &Config) -> Result<()> {
        let shaders = load_shaders(&config.shader);
-       let texture_sources = load_textures_with_size(&config.textures, self.config.width, self.config.height);
-       
        let context = self.context.clone().ok_or_else(|| anyhow::anyhow!("No GPU context"))?;
+       let texture_sources = load_textures_with_size(&config.textures, self.config.width, self.config.height, Some(context.clone()));
+       
        let pipeline = WgpuPipeline::new(context, self.config.width, self.config.height, shaders, texture_sources)?;
        self.pipeline = Some(pipeline);
        Ok(())
@@ -559,17 +560,17 @@ fn run_virtual_camera_mode(config: Config) -> Result<()> {
     // Load shaders if provided
     let shaders = load_shaders(&config.shader);
 
-    // Build texture sources from config textures
-    let texture_sources = load_textures_with_size(&config.textures, config.width, config.height);
-    
-    // Initialize config watcher if config file is used
-    let mut config_watcher = ConfigWatcher::new(config.config_path.clone());
-
     // Initialize GPU Context (headless/no-window)
     let context = Arc::new(GpuContext::new(None)?);
 
+    // Build texture sources from config textures
+    let texture_sources = load_textures_with_size(&config.textures, config.width, config.height, Some(context.clone()));
+    
     let mut pipeline = WgpuPipeline::new(context.clone(), config.width, config.height, shaders, texture_sources)?;
     info!("Shader pipeline initialized");
+
+    // Initialize config watcher if config file is used
+    let mut config_watcher = ConfigWatcher::new(config.config_path.clone());
 
     // Initialize virtual camera output
     let vc_config = VirtualCameraConfig {
@@ -601,7 +602,7 @@ fn run_virtual_camera_mode(config: Config) -> Result<()> {
                     if diff.needs_pipeline_reload() {
                         info!("Reloading pipeline due to shader/texture changes...");
                         let new_shaders = load_shaders(&new_config.shader);
-                        let new_texture_sources = load_textures_with_size(&new_config.textures, config.width, config.height);
+                        let new_texture_sources = load_textures_with_size(&new_config.textures, config.width, config.height, Some(context.clone()));
                        
                         match WgpuPipeline::new(context.clone(), config.width, config.height, new_shaders, new_texture_sources) {
                            Ok(new_pipeline) => {

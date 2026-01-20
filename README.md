@@ -194,7 +194,7 @@ Proteus will automatically resolve the stream using `streamlink` and pipe it to 
 
 ### Lua Canvas (Dynamic Textures)
 
-Lua scripts can generate dynamic textures in real-time using CPU-based 2D rendering. These are useful for procedural animations, particle effects, or interactive visualizations that get composited with your camera feed via shaders.
+Lua scripts can generate dynamic textures in real-time using GPU-accelerated 2D rendering. These are useful for procedural animations, particle effects, or interactive visualizations that get composited with your camera feed via shaders.
 
 **Requirements**:
 - A Lua script that follows the required module structure (see below)
