@@ -5,6 +5,7 @@ use proteus::video::VideoPlayer;
 use proteus::lua_canvas::LuaCanvas;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{channel, Receiver};
 use std::fs;
 use tracing::{info, error};
@@ -136,8 +137,15 @@ pub fn load_shaders(paths: &[PathBuf]) -> Vec<ShaderSource> {
 }
 
 /// Helper to load texture sources from TextureInput list with specified canvas size.
-pub fn load_textures_with_size(inputs: &[crate::TextureInput], width: u32, height: u32) -> Vec<TextureSlot> {
+pub fn load_textures_with_size(
+    inputs: &[crate::TextureInput],
+    width: u32,
+    height: u32,
+    context: Option<Arc<proteus::shader::gpu_context::GpuContext>>,
+) -> Vec<TextureSlot> {
     let mut texture_sources = Vec::new();
+    let device_queue = context.map(|ctx| (Arc::new(ctx.device.clone()), Arc::new(ctx.queue.clone())));
+
     for input in inputs {
         if texture_sources.len() >= 4 { break; }
         match input {
@@ -154,7 +162,7 @@ pub fn load_textures_with_size(inputs: &[crate::TextureInput], width: u32, heigh
                 texture_sources.push(TextureSlot::Image(path.clone()));
             },
             crate::TextureInput::Lua { path } => {
-                match LuaCanvas::new(path, width, height) {
+                match LuaCanvas::new(path, width, height, device_queue.clone()) {
                     Ok(canvas) => texture_sources.push(TextureSlot::LuaCanvas(canvas)),
                     Err(e) => {
                         error!("Failed to create Lua canvas {:?}: {}", path, e);
