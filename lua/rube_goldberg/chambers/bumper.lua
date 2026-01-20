@@ -1,5 +1,5 @@
 -- Chamber 12: Bumper
--- Pinball style bouncy bumpers
+-- Pinball style bouncy bumpers (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         bumpers = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -17,6 +18,9 @@ function M:init(w, h)
     self.w = w
     self.h = h
     self.t = 0
+    
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
     
     self.bumpers = {}
     
@@ -26,17 +30,22 @@ function M:init(w, h)
     while #self.bumpers < num_bumpers and attempts < 100 do
         attempts = attempts + 1
         
-        local radius = math.random(20, 35)
-        local x = math.random(radius + 20, w - radius - 20)
-        local y = math.random(math.floor(h * 0.15), math.floor(h * 0.85))
+        -- Proportional radius (4-7% of smaller dimension)
+        local min_dim = math.min(w, h)
+        local radius = min_dim * (0.04 + math.random() * 0.03)
+        
+        -- Proportional position
+        local margin = radius + min_dim * 0.04
+        local x = margin + math.random() * (w - 2 * margin)
+        local y = h * 0.15 + math.random() * (h * 0.7)
         
         local overlap = false
         for _, b in ipairs(self.bumpers) do
             local dx = x - b.x
             local dy = y - b.y
             local dist = math.sqrt(dx*dx + dy*dy)
-            -- Minimum separation: sum of radii + margin
-            if dist < (radius + b.radius + 20) then
+            -- Minimum separation: sum of radii + proportional margin
+            if dist < (radius + b.radius + min_dim * 0.04) then
                 overlap = true
                 break
             end
@@ -100,6 +109,9 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local stroke_width = math.max(2, math.floor(3 * self.scale))
+    local inner_stroke = math.max(1, math.floor(2 * self.scale))
+    
     for _, b in ipairs(self.bumpers) do
         -- Base color
         local r, g, blu = 200, 50, 50
@@ -113,11 +125,11 @@ function M:draw(ox, oy, w, h)
         canvas.fill_circle(ox + b.x, oy + b.y, b.radius, r, g, blu, 255)
         
         -- Draw rim
-        canvas.stroke_circle(ox + b.x, oy + b.y, b.radius, 255, 255, 255, 255, 3)
+        canvas.stroke_circle(ox + b.x, oy + b.y, b.radius, 255, 255, 255, 255, stroke_width)
         
-        -- Detail rings
-        canvas.stroke_circle(ox + b.x, oy + b.y, b.radius * 0.6, 255, 255, 255, 150, 2)
-        canvas.stroke_circle(ox + b.x, oy + b.y, b.radius * 0.3, 255, 255, 255, 150, 2)
+        -- Detail rings (proportional to radius)
+        canvas.stroke_circle(ox + b.x, oy + b.y, b.radius * 0.6, 255, 255, 255, 150, inner_stroke)
+        canvas.stroke_circle(ox + b.x, oy + b.y, b.radius * 0.3, 255, 255, 255, 150, inner_stroke)
     end
 end
 

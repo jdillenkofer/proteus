@@ -1,5 +1,5 @@
 -- Chamber 11: Magnet
--- Central attractor/repulsor
+-- Central attractor/repulsor (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         magnets = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -17,12 +18,18 @@ function M:init(w, h)
     self.w = w
     self.h = h
     self.t = 0
+    
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
 
     local type = math.random(1, 2) == 1 and "pull" or "push"
     
+    -- Proportional radius (about 8% of smaller dimension)
+    local radius = math.min(w, h) * 0.08
+    
     self.magnets = {
-        -- Central strong attractor
-        { x = w * 0.5, y = h * 0.5, radius = 40, force = 9000000, type = type }, -- Scale force for gravity-like feel
+        -- Central strong attractor (force scales with area)
+        { x = w * 0.5, y = h * 0.5, radius = radius, force = 9000000 * self.scale * self.scale, type = type },
     }
 end
 
@@ -74,11 +81,13 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local max_offset = math.floor(200 * self.scale)
+    
     for _, m in ipairs(self.magnets) do
         -- Draw field lines
         local pulses = 5
         for i = 1, pulses do
-            local offset = (self.t * 5 + i * (200/pulses)) % 200
+            local offset = (self.t * 5 * self.scale + i * (max_offset/pulses)) % max_offset
             local radius = m.radius + offset
             local alpha = math.max(0, 255 - offset * 1.5)
             
@@ -98,7 +107,7 @@ function M:draw(ox, oy, w, h)
         
         -- Draw N (North/pull) or S (South/push) label on the magnet
         local label = m.type == "pull" and "N" or "S"
-        local label_size = m.radius * 1.2
+        local label_size = math.max(12, m.radius * 1.2)
         local lw, lh = canvas.measure_text(label, label_size)
         canvas.draw_text(ox + m.x - lw * 0.5, oy + m.y - lh * 0.5, label, label_size, 255, 255, 255, 255)
     end

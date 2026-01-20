@@ -1,5 +1,5 @@
 -- Chamber 1: Antigravity
--- Regions that reverse or negate gravity
+-- Regions that reverse or negate gravity (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -11,6 +11,7 @@ function M.new()
         zones = {},
         t = 0,
         particles = {},
+        scale = 1,
     }, M)
 end
 
@@ -21,22 +22,27 @@ function M:init(w, h)
     self.zones = {}
     self.particles = {}
     
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
     local num_zones = math.random(2, 3)
     for i = 1, num_zones do
-        local zw = math.random(math.floor(w * 0.3), math.floor(w * 0.6))
-        local zh = math.random(math.floor(h * 0.2), math.floor(h * 0.4))
+        -- Proportional zone sizes (30-60% width, 20-40% height)
+        local zw = w * (0.3 + math.random() * 0.3)
+        local zh = h * (0.2 + math.random() * 0.2)
         table.insert(self.zones, {
-            x = math.random(math.floor(w * 0.1), math.floor(w * 0.9 - zw)),
+            x = w * (0.1 + math.random() * (0.8 - zw/w)),
             y = h * ((i-0.5) / num_zones) - zh * 0.5,
             w = zw,
             h = zh,
-            force = -600, -- Counteracts gravity (400) and adds lift
+            force = -600 * self.scale, -- Scale force with resolution
             color = {150, 200, 255},
         })
     end
     
-    -- Initial particles
-    for i = 1, 30 do
+    -- Initial particles (count scales with chamber size)
+    local particle_count = math.floor(30 * self.scale)
+    for i = 1, particle_count do
         table.insert(self.particles, self:create_particle())
     end
 end
@@ -45,8 +51,8 @@ function M:create_particle()
     return {
         x = math.random(0, math.floor(self.w)),
         y = math.random(0, math.floor(self.h)),
-        size = math.random(2, 4),
-        speed = math.random(20, 50),
+        size = math.max(1, math.floor((2 + math.random() * 2) * self.scale)),
+        speed = (20 + math.random() * 30) * self.scale,
         life = math.random(),
     }
 end
@@ -96,6 +102,9 @@ function M:draw(ox, oy, w, h)
     end
 
     -- Draw zones
+    local corner_size = math.max(5, math.floor(10 * self.scale))
+    local stroke_width = math.max(1, math.floor(2 * self.scale))
+    
     for _, z in ipairs(self.zones) do
         -- Faint background glow
         local pulse = 0.8 + 0.2 * math.sin(self.t * 3)
@@ -103,11 +112,11 @@ function M:draw(ox, oy, w, h)
         canvas.fill_rect(ox + z.x, oy + z.y, z.w, z.h, r, g, b, math.floor(20 * pulse))
         
         -- Borders
-        canvas.stroke_rect(ox + z.x, oy + z.y, z.w, z.h, r, g, b, 150, 2)
+        canvas.stroke_rect(ox + z.x, oy + z.y, z.w, z.h, r, g, b, 150, stroke_width)
         
-        -- Corner accents
-        canvas.fill_rect(ox + z.x, oy + z.y, 10, 2, 255, 255, 255, 200)
-        canvas.fill_rect(ox + z.x, oy + z.y, 2, 10, 255, 255, 255, 200)
+        -- Corner accents (scaled)
+        canvas.fill_rect(ox + z.x, oy + z.y, corner_size, stroke_width, 255, 255, 255, 200)
+        canvas.fill_rect(ox + z.x, oy + z.y, stroke_width, corner_size, 255, 255, 255, 200)
     end
 end
 

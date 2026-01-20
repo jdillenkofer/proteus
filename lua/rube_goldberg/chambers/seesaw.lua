@@ -1,5 +1,5 @@
 -- Chamber: See-Saw
--- Tilting platforms that react to ball weight
+-- Tilting platforms that react to ball weight (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         seesaws = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -17,6 +18,9 @@ function M:init(w, h)
     self.w = w
     self.h = h
     self.t = 0
+    
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
     
     self.seesaws = {
         { cx = w * 0.5, cy = h * 0.4, length = w * 0.7, angle = 0, angular_vel = 0 },
@@ -62,7 +66,7 @@ function M:update(dt, balls)
             local dist_y = ball.y - proj_y
             local dist = math.sqrt(dist_x*dist_x + dist_y*dist_y)
             
-            local thickness = 8
+            local thickness = math.max(4, math.floor(8 * self.scale))
             if dist < ball.radius + thickness then
                 -- Normal (perpendicular, pointing "up" relative to tilt)
                 local nx = -sin_a
@@ -90,6 +94,9 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local plank_width = math.max(6, math.floor(12 * self.scale))
+    local hub_radius = math.max(5, math.floor(10 * self.scale))
+    
     for _, s in ipairs(self.seesaws) do
         local cos_a = math.cos(s.angle)
         local sin_a = math.sin(s.angle)
@@ -99,8 +106,8 @@ function M:draw(ox, oy, w, h)
         local x2 = ox + s.cx + cos_a * s.length * 0.5
         local y2 = oy + s.cy + sin_a * s.length * 0.5
         
-        canvas.draw_line(x1, y1, x2, y2, 150, 100, 50, 255, 12)
-        canvas.fill_circle(ox + s.cx, oy + s.cy, 10, 100, 80, 40, 255)
+        canvas.draw_line(x1, y1, x2, y2, 150, 100, 50, 255, plank_width)
+        canvas.fill_circle(ox + s.cx, oy + s.cy, hub_radius, 100, 80, 40, 255)
     end
 end
 

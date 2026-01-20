@@ -1,5 +1,5 @@
 -- Chamber 9: Conveyor
--- Moving belts
+-- Moving belts (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         belts = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -18,9 +19,15 @@ function M:init(w, h)
     self.h = h
     self.t = 0
     
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
+    -- Proportional belt height (about 3% of chamber height)
+    local belt_h = math.max(8, math.floor(h * 0.03))
+    
     self.belts = {
-        { x = w * 0.1, y = h * 0.3, w = w * 0.4, h = 15, speed = 100 },
-        { x = w * 0.5, y = h * 0.6, w = w * 0.4, h = 15, speed = -100 },
+        { x = w * 0.1, y = h * 0.3, w = w * 0.4, h = belt_h, speed = 100 * self.scale },
+        { x = w * 0.5, y = h * 0.6, w = w * 0.4, h = belt_h, speed = -100 * self.scale },
     }
 end
 
@@ -55,20 +62,23 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local tread_spacing = math.max(10, math.floor(20 * self.scale))
+    local line_width = math.max(1, math.floor(2 * self.scale))
+    
     for _, b in ipairs(self.belts) do
         -- Draw belt rect
         canvas.fill_rect(ox + b.x, oy + b.y, b.w, b.h, 60, 60, 60, 255)
         
         -- Draw animated treads
-        local offset = (self.t * b.speed) % 20
-        for i = 0, b.w, 20 do
+        local offset = (self.t * b.speed) % tread_spacing
+        for i = 0, b.w, tread_spacing do
             local x = i + offset
             if x > b.w then x = x - b.w end
             if x < 0 then x = x + b.w end -- handle negative speed
             
             -- don't draw if outside
             if x < b.w then
-                 canvas.draw_line(ox + b.x + x, oy + b.y, ox + b.x + x, oy + b.y + b.h, 40, 40, 40, 255, 2)
+                 canvas.draw_line(ox + b.x + x, oy + b.y, ox + b.x + x, oy + b.y + b.h, 40, 40, 40, 255, line_width)
             end
         end
         

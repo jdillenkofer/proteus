@@ -1,5 +1,5 @@
 -- Chamber: Pong
--- Auto-moving paddles that bounce balls back and forth
+-- Auto-moving paddles that bounce balls back and forth (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -12,6 +12,7 @@ function M.new()
         t = 0,
         score_left = 0,
         score_right = 0,
+        scale = 1,
     }, M)
 end
 
@@ -20,9 +21,13 @@ function M:init(w, h)
     self.h = h
     self.t = 0
     
-    local paddle_width = 15
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
+    -- Proportional paddle dimensions
+    local paddle_width = math.max(8, math.floor(w * 0.03))
     local paddle_height = h * 0.25
-    local margin = 20
+    local margin = math.max(10, math.floor(math.min(w, h) * 0.04))
     
     self.paddles = {
         -- Left paddle
@@ -32,7 +37,7 @@ function M:init(w, h)
             w = paddle_width,
             h = paddle_height,
             target_y = h * 0.5,
-            speed = 300,
+            speed = 300 * self.scale,
             color = {100, 200, 255},
             side = "left",
         },
@@ -43,7 +48,7 @@ function M:init(w, h)
             w = paddle_width,
             h = paddle_height,
             target_y = h * 0.5,
-            speed = 300,
+            speed = 300 * self.scale,
             color = {255, 150, 100},
             side = "right",
         },
@@ -140,8 +145,8 @@ function M:update(dt, balls)
                 else
                     local predicted_y = target_ball.y + target_ball.vy * time_to_paddle
                     
-                    -- Add "Human Error" (Perception Noise)
-                    local error_margin = 50
+                    -- Add "Human Error" (Perception Noise) - scaled
+                    local error_margin = 50 * self.scale
                     local mistake = (math.random() * 2 - 1) * error_margin
                     
                     predicted_y = predicted_y + mistake
@@ -242,17 +247,18 @@ function M:update(dt, balls)
                         -- Flip X direction and speed up slightly
                         ball.vx = -ball.vx * 1.05
                         
-                        -- Ensure minimum horizontal speed so it doesn't get stuck vertically
-                        if  math.abs(ball.vx) < 300 then
-                            ball.vx = (ball.vx < 0 and -300 or 300)
+                        -- Ensure minimum horizontal speed so it doesn't get stuck vertically (scaled)
+                        local min_speed = 300 * self.scale
+                        if  math.abs(ball.vx) < min_speed then
+                            ball.vx = (ball.vx < 0 and -min_speed or min_speed)
                         end
                         
                         -- Adjust Y velocity based on where it hit the paddle (English/Spin effect)
-                        -- Hitting edges adds more vertical velocity
-                        ball.vy = hit_pos * 400
+                        -- Hitting edges adds more vertical velocity (scaled)
+                        ball.vy = hit_pos * 400 * self.scale
                         
-                        -- Cap max speed
-                        local MAX_SPEED = 1000
+                        -- Cap max speed (scaled)
+                        local MAX_SPEED = 1000 * self.scale
                         local speed_sq = ball.vx*ball.vx + ball.vy*ball.vy
                         if speed_sq > MAX_SPEED*MAX_SPEED then
                             local scale = MAX_SPEED / math.sqrt(speed_sq)
@@ -280,37 +286,43 @@ function M:update(dt, balls)
             
             -- Score detection: ball touched the back wall (paddle missed)
             -- Left wall: right player scores
-            if ball.x - ball.radius <= 5 then
+            local wall_tolerance = math.max(3, math.floor(5 * self.scale))
+            if ball.x - ball.radius <= wall_tolerance then
                 self.score_right = self.score_right + 1
                 -- Reset ball to center
                 ball.x = self.w * 0.5
                 ball.y = self.h * 0.5
-                ball.vx = 300 + math.random() * 100
-                ball.vy = (math.random() * 200 - 100)
+                ball.vx = (300 + math.random() * 100) * self.scale
+                ball.vy = (math.random() * 200 - 100) * self.scale
             end
             -- Right wall: left player scores
-            if ball.x + ball.radius >= self.w - 5 then
+            if ball.x + ball.radius >= self.w - wall_tolerance then
                 self.score_left = self.score_left + 1
                 -- Reset ball to center
                 ball.x = self.w * 0.5
                 ball.y = self.h * 0.5
-                ball.vx = -300 - math.random() * 100
-                ball.vy = (math.random() * 200 - 100)
+                ball.vx = (-300 - math.random() * 100) * self.scale
+                ball.vy = (math.random() * 200 - 100) * self.scale
             end
         end
     end
 end
 
 function M:draw(ox, oy, w, h)
+    local dash_len = math.max(10, math.floor(20 * self.scale))
+    local gap = math.max(8, math.floor(15 * self.scale))
+    local line_width = math.max(2, math.floor(4 * self.scale))
+    local glow_size = math.max(2, math.floor(3 * self.scale))
+    local highlight_size = math.max(2, math.floor(4 * self.scale))
+    local stroke_width = math.max(1, math.floor(2 * self.scale))
+    
     -- Center line (dashed)
-    local dash_len = 20
-    local gap = 15
     for y = 0, self.h, dash_len + gap do
-        canvas.fill_rect(ox + self.w * 0.5 - 2, oy + y, 4, dash_len, 80, 80, 100, 150)
+        canvas.fill_rect(ox + self.w * 0.5 - line_width/2, oy + y, line_width, dash_len, 80, 80, 100, 150)
     end
     
-    -- Draw score
-    local score_size = 48
+    -- Draw score (scaled)
+    local score_size = math.max(24, math.floor(48 * self.scale))
     local left_score_str = tostring(self.score_left)
     local right_score_str = tostring(self.score_right)
     
@@ -326,8 +338,8 @@ function M:draw(ox, oy, w, h)
     for _, paddle in ipairs(self.paddles) do
         -- Glow effect
         canvas.fill_rect(
-            ox + paddle.x - 3, oy + paddle.y - 3,
-            paddle.w + 6, paddle.h + 6,
+            ox + paddle.x - glow_size, oy + paddle.y - glow_size,
+            paddle.w + glow_size*2, paddle.h + glow_size*2,
             paddle.color[1], paddle.color[2], paddle.color[3], 30
         )
         
@@ -340,8 +352,8 @@ function M:draw(ox, oy, w, h)
         
         -- Highlight
         canvas.fill_rect(
-            ox + paddle.x + 2, oy + paddle.y + 2,
-            paddle.w - 4, 4,
+            ox + paddle.x + stroke_width, oy + paddle.y + stroke_width,
+            paddle.w - stroke_width*2, highlight_size,
             255, 255, 255, 100
         )
         
@@ -349,7 +361,7 @@ function M:draw(ox, oy, w, h)
         canvas.stroke_rect(
             ox + paddle.x, oy + paddle.y,
             paddle.w, paddle.h,
-            255, 255, 255, 150, 2
+            255, 255, 255, 150, stroke_width
         )
     end
 end

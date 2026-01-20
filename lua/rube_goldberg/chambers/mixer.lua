@@ -1,5 +1,5 @@
 -- Chamber 5: Mixer
--- Spinning blades that mix balls around
+-- Spinning blades that mix balls around (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -10,6 +10,7 @@ function M.new()
         h = 0,
         blades = {},
         t = 0,
+        scale = 1,
     }, M)
 end
 
@@ -18,9 +19,15 @@ function M:init(w, h)
     self.h = h
     self.t = 0
     
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
+    -- Proportional blade length (about 12% of smaller dimension)
+    local blade_len = math.min(w, h) * 0.12
+    
     self.blades = {
-        { cx = w * 0.3, cy = h * 0.5, len = 60, speed = 3 },
-        { cx = w * 0.7, cy = h * 0.5, len = 60, speed = -2.5 },
+        { cx = w * 0.3, cy = h * 0.5, len = blade_len, speed = 3 },
+        { cx = w * 0.7, cy = h * 0.5, len = blade_len, speed = -2.5 },
     }
 end
 
@@ -50,7 +57,7 @@ function M:update(dt, balls)
             local proj_y = y1 + t * dy
             
             local dist_sq = (ball.x - proj_x)^2 + (ball.y - proj_y)^2
-            local thick = 8
+            local thick = math.max(4, math.floor(8 * self.scale))
             
             if dist_sq < (ball.radius + thick)^2 then
                 -- Deflect ball
@@ -64,10 +71,10 @@ function M:update(dt, balls)
                 ball.x = ball.x + nx * overlap
                 ball.y = ball.y + ny * overlap
                 
-                -- Add velocity from spinner
-                local spin_vel = b.speed * 100
-                ball.vx = ball.vx + nx * 50 - s * spin_vel * 0.5
-                ball.vy = ball.vy + ny * 50 + c * spin_vel * 0.5
+                -- Add velocity from spinner (scaled)
+                local spin_vel = b.speed * 100 * self.scale
+                ball.vx = ball.vx + nx * 50 * self.scale - s * spin_vel * 0.5
+                ball.vy = ball.vy + ny * 50 * self.scale + c * spin_vel * 0.5
             end
         end
         
@@ -76,6 +83,9 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local blade_width = math.max(8, math.floor(16 * self.scale))
+    local hub_radius = math.max(5, math.floor(10 * self.scale))
+    
     -- Draw blades
     for _, b in ipairs(self.blades) do
         local angle = self.t * b.speed
@@ -86,8 +96,8 @@ function M:draw(ox, oy, w, h)
         local x2 = ox + b.cx + c * b.len
         local y2 = oy + b.cy + s * b.len
         
-        canvas.draw_line(x1, y1, x2, y2, 200, 100, 100, 255, 16)
-        canvas.fill_circle(ox + b.cx, oy + b.cy, 10, 150, 150, 150, 255)
+        canvas.draw_line(x1, y1, x2, y2, 200, 100, 100, 255, blade_width)
+        canvas.fill_circle(ox + b.cx, oy + b.cy, hub_radius, 150, 150, 150, 255)
     end
 end
 

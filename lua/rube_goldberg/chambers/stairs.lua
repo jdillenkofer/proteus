@@ -1,5 +1,5 @@
 -- Chamber 4: Stairs
--- Descending steps with dynamic movement and neon aesthetics
+-- Descending steps with dynamic movement and neon aesthetics (resolution-independent)
 
 local M = {}
 M.__index = M
@@ -11,6 +11,7 @@ function M.new()
         steps = {},
         t = 0,
         dir = 1, -- 1 for right, -1 for left
+        scale = 1,
     }, M)
 end
 
@@ -20,11 +21,17 @@ function M:init(w, h)
     self.t = 0
     self.dir = math.random() < 0.5 and 1 or -1
     
+    -- Calculate scale factor (reference: 480x270 per chamber at 1920x1080 in 4x4 grid)
+    self.scale = math.min(w / 480, h / 270)
+    
     self.steps = {}
     local num_steps = math.random(6, 9)
     local total_w = w * 0.9
     local step_w = total_w / num_steps
     local step_h = (h * 0.7) / num_steps
+    
+    -- Proportional step thickness (about 2% of height)
+    local step_thick = math.max(6, math.floor(h * 0.02))
     
     for i = 1, num_steps do
         local x
@@ -42,12 +49,12 @@ function M:init(w, h)
             x = x,
             y = h * 0.15 + (i - 1) * step_h,
             w = step_w + 5,
-            h = 12,
+            h = step_thick,
             is_booster = is_booster,
             -- Move logic
             move_type = math.random(1, 4), -- 1: static, 2: horiz, 3: vert, 4: phase
             offset = math.random() * math.pi * 2,
-            range = math.random(10, 30),
+            range = (10 + math.random() * 20) * self.scale,
             speed = math.random() * 2 + 1,
         })
     end
@@ -85,9 +92,9 @@ function M:update(dt, balls)
                      local bounce = s.is_booster and 1.8 or 0.8
                      ball.vy = -ball.vy * bounce
                      
-                     -- Progression nudge
-                     ball.vx = ball.vx + (self.dir * 60 * dt)
-                     if math.abs(ball.vx) < 30 then ball.vx = self.dir * 30 end
+                     -- Progression nudge (scaled)
+                     ball.vx = ball.vx + (self.dir * 60 * dt * self.scale)
+                     if math.abs(ball.vx) < 30 * self.scale then ball.vx = self.dir * 30 * self.scale end
                  end
             end
         end
@@ -95,6 +102,9 @@ function M:update(dt, balls)
 end
 
 function M:draw(ox, oy, w, h)
+    local glow_size = math.max(1, math.floor(2 * self.scale))
+    local top_edge = math.max(2, math.floor(3 * self.scale))
+    
     for i, s in ipairs(self.steps) do
         local r, g, b = 100, 100, 100
         
@@ -105,13 +115,13 @@ function M:draw(ox, oy, w, h)
         end
         
         -- Glow under
-        canvas.fill_rect(ox + s.x - 2, oy + s.y - 2, s.w + 4, s.h + 4, r, g, b, 40)
+        canvas.fill_rect(ox + s.x - glow_size, oy + s.y - glow_size, s.w + glow_size*2, s.h + glow_size*2, r, g, b, 40)
         
         -- Slab
         canvas.fill_rect(ox + s.x, oy + s.y, s.w, s.h, 20, 20, 30, 255)
         
         -- Top neon edge
-        canvas.fill_rect(ox + s.x, oy + s.y, s.w, 3, r, g, b, 255)
+        canvas.fill_rect(ox + s.x, oy + s.y, s.w, top_edge, r, g, b, 255)
         
         -- Subtle highlight
         if s.is_booster then
