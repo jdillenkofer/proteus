@@ -1,4 +1,4 @@
--- Rube Goldberg Machine Manager
+-- Contraption Machine Manager
 -- Renders multiple chambers in a tiled layout
 -- Balls use GLOBAL coordinates and can overlap multiple chambers
 -- Both chambers affect physics when ball overlaps their boundary

@@ -397,10 +397,6 @@ impl LuaCanvas {
             canvas_table.set("fill_circle", fill_circle_fn)?;
         }
 
-        // ... repeat for others as needed ...
-        // For brevity, I'll only add the ones used in rube_goldberg for now and then add the rest.
-        // Actually, I'll add all of them to be safe.
-
         // canvas.stroke_rect(x, y, w, h, r, g, b, a, stroke)
         {
             let state = state.clone();
