@@ -759,7 +759,8 @@ impl WgpuPipeline {
         }
 
         // 3. Readback Buffer (4 bytes per pixel for Rgba8UnormSrgb, used after blit)
-        let size = (self.output_width * self.output_height * 4) as wgpu::BufferAddress;
+        // Rows are padded to COPY_BYTES_PER_ROW_ALIGNMENT as required by copy_texture_to_buffer.
+        let size = (Self::readback_bytes_per_row(self.output_width) * self.output_height) as wgpu::BufferAddress;
         self.readback_buffer = Some(self.context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Readback Buffer"),
             size,
@@ -879,6 +880,11 @@ impl WgpuPipeline {
         self.cached_mask_width = mask_w;
         self.cached_mask_height = mask_h;
         Ok(())
+    }
+
+    /// Bytes per row of the RGBA readback buffer, padded to wgpu's row alignment.
+    fn readback_bytes_per_row(width: u32) -> u32 {
+        (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
     }
 
     /// Creates a 1x1 black RGBA texture as fallback for missing image inputs.
@@ -1195,9 +1201,11 @@ impl ShaderPipeline for WgpuPipeline {
         }
 
         // 2. Copy sRGB texture to buffer
+        let row_bytes = (self.output_width * 4) as usize;
+        let padded_row_bytes = Self::readback_bytes_per_row(self.output_width);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture: self.srgb_output_texture.as_ref().unwrap(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: self.readback_buffer.as_ref().unwrap(), layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.output_width * 4), rows_per_image: Some(self.output_height) } },
+            wgpu::TexelCopyBufferInfo { buffer: self.readback_buffer.as_ref().unwrap(), layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row_bytes), rows_per_image: Some(self.output_height) } },
             wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
         );
 
@@ -1212,8 +1220,16 @@ impl ShaderPipeline for WgpuPipeline {
 
         let data = buffer_slice.get_mapped_range();
         
-        // Data is now already correct sRGB u8. No conversion needed.
-        let output_data = data.to_vec();
+        // Data is now already correct sRGB u8. No conversion needed, only strip row padding if present.
+        let output_data = if padded_row_bytes as usize == row_bytes {
+            data.to_vec()
+        } else {
+            let mut unpadded = Vec::with_capacity(row_bytes * self.output_height as usize);
+            for row in data.chunks_exact(padded_row_bytes as usize) {
+                unpadded.extend_from_slice(&row[..row_bytes]);
+            }
+            unpadded
+        };
         
         drop(data);
         self.readback_buffer.as_ref().unwrap().unmap();
