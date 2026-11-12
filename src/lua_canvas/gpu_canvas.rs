@@ -892,7 +892,7 @@ impl GpuCanvas {
     /// Get the cached sRGB texture view for the canvas texture.
     /// Note: Call prepare_texture() first to ensure all draws are flushed.
     /// Returns an sRGB view so samplers convert sRGB->linear automatically.
-    pub fn texture_view(&self) -> &wgpu::TextureView {
+    pub fn srgb_view(&self) -> &wgpu::TextureView {
         &self.srgb_view
     }
 }

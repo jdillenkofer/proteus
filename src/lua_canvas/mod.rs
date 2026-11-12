@@ -797,7 +797,7 @@ impl LuaCanvas {
                 }
             }
             canvas.prepare_texture();
-            let view = canvas.texture_view().clone();
+            let view = canvas.srgb_view().clone();
             let dirty = self.view_dirty;
             self.view_dirty = false;
             (view, dirty)
