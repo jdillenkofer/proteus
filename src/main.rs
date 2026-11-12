@@ -151,7 +151,11 @@ impl Config {
         
         let mut config: Config = serde_yaml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse config file {:?}: {}", path, e))?;
-        
+
+        if config.fps == 0 {
+            anyhow::bail!("Invalid config file {:?}: fps must be at least 1", path);
+        }
+
         config.config_path = Some(path.clone());
         info!("Loaded configuration from {:?}", path);
         
@@ -198,7 +202,7 @@ struct Args {
     max_input_height: Option<u32>,
 
     /// Target frames per second
-    #[arg(long, default_value = "30")]
+    #[arg(long, default_value = "30", value_parser = clap::value_parser!(u32).range(1..))]
     fps: u32,
 
     /// List available cameras and exit
