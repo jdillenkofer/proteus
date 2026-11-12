@@ -166,7 +166,7 @@ impl Config {
 #[command(group = clap::ArgGroup::new("config_or_options")
     .required(false)
     .args(["config"])
-    .conflicts_with_all(["input", "shader", "width", "height", "max_input_width", "max_input_height", "fps", "output", "image", "video"])
+    .conflicts_with_all(["input", "shader", "width", "height", "max_input_width", "max_input_height", "fps", "output", "image", "video", "lua"])
 )]
 struct Args {
     /// Path to YAML configuration file (mutually exclusive with other options)
