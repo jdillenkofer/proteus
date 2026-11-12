@@ -2,7 +2,7 @@
 
 mod config_utils;
 mod utils;
-use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures_with_size, init_capture};
+use config_utils::{ConfigDiff, ConfigWatcher, load_shaders, load_textures_with_size};
 use utils::FpsCounter;
 
 use anyhow::Result;
@@ -276,14 +276,12 @@ impl ProteusApp {
 
         info!("Opening camera device {}...", self.config.input);
         
-        if let Some(capture) = init_capture(capture_config) {
-             let (cam_w, cam_h) = capture.frame_size();
-             info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
-             self.capture = Some(capture);
-        } else {
-             error!("Failed to initialize camera capture");
-             // Don't error out, just continue without capture (recoverable via config reload)
-        }
+        // Input changes are not hot-reloadable, so a missing camera is fatal here
+        // just like in virtual camera mode.
+        let capture = AsyncCapture::new(capture_config)?;
+        let (cam_w, cam_h) = capture.frame_size();
+        info!("Camera opened successfully at {}x{} (async capture)", cam_w, cam_h);
+        self.capture = Some(capture);
 
         // Load shaders if provided
         let shaders = load_shaders(&self.config.shader);

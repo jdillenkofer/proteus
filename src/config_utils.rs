@@ -1,5 +1,4 @@
 use crate::Config;
-use proteus::capture::{AsyncCapture, CaptureConfig};
 use proteus::shader::{ShaderSource, TextureSlot};
 use proteus::video::VideoPlayer;
 use proteus::lua_canvas::LuaCanvas;
@@ -173,15 +172,4 @@ pub fn load_textures_with_size(
         }
     }
     texture_sources
-}
-
-/// Helper to initialize camera.
-pub fn init_capture(config: CaptureConfig) -> Option<AsyncCapture> {
-    match AsyncCapture::new(config) {
-        Ok(capture) => Some(capture),
-        Err(e) => {
-             error!("Failed to initialize capture: {}", e);
-             None
-        }
-    }
 }
